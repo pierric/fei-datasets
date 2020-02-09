@@ -93,7 +93,7 @@ loadImageAndBBoxes ident = do
         imgInfo = fromListUnboxed (Z :. 3) [fromIntegral imgH', fromIntegral imgW', scale]
 
         imgResized = HIP.resize HIP.Bilinear HIP.Edge (imgH', imgW') imgRGB
-        imgPadded  = HIP.canvasSize (HIP.Fill $ HIP.PixelRGB 0 0 0) (width, width) imgResized
+        imgPadded  = HIP.canvasSize (HIP.Fill $ HIP.PixelRGB 0.5 0.5 0.5) (width, width) imgResized
         imgRepa    = Repa.fromUnboxed (Z:.width:.width:.3) $ SV.convert $ SV.unsafeCast $ HIP.toVector imgPadded
 
     let annoFilePath = base </> "Annotations" </> ident <.> "xml"
