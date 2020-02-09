@@ -4,6 +4,7 @@ resolver: lts-12.16
 packages:
 - .
 extra-deps:
+- ../fei-cocoapi
 - ../fei-nn
 - ../fei-base
 - ../tuple-ops
@@ -20,10 +21,11 @@ extra-deps:
 - Chart-1.9
 - Chart-diagrams-1.9
 - SVGFonts-1.6.0.3
+- JuicyPixels-repa-0.7.1.0
 extra-include-dirs:
-- /home/jiasen/incubator-mxnet/include
+- /home/jiasen/hdd/dschungel/incubator-mxnet-1.5/include
 extra-lib-dirs:
-- /home/jiasen/incubator-mxnet
+- /home/jiasen/hdd/dschungel/incubator-mxnet-1.5/lib
 flags:
   fei-base:
     MXNet_1_5: true
