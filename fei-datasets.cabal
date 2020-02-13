@@ -82,4 +82,29 @@ Executable render
                           FontyFruity,
                           Rasterific
     ghc-options:          -threaded
+Executable bench 
+    hs-source-dirs:       utils
+    main-is:              bench.hs
+    default-language:     Haskell2010
+    build-depends:        base >= 4.7 && < 5.0,
+                          fei-base,
+                          fei-nn,
+                          fei-datasets,
+                          optparse-applicative,
+                          criterion,
+                          attoparsec,
+                          resourcet,
+                          filepath,
+                          lens,
+                          vector,
+                          text,
+                          containers,
+                          mtl,
+                          conduit,
+                          repa,
+                          hip,
+                          JuicyPixels,
+                          JuicyPixels-repa,
+                          JuicyPixels-extra
+    ghc-options:          -threaded
 

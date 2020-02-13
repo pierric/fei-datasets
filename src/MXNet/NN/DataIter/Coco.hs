@@ -3,7 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module MXNet.NN.DataIter.Coco(
     module MXNet.NN.DataIter.Common,
-    Configuration(..), CocoConfig, conf_width,
+    Configuration(..), CocoConfig, conf_width, Coco(..),
     classes, coco, cocoImages, cocoImagesAndBBoxes, loadImageAndBBoxes
 ) where
 
