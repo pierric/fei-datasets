@@ -139,9 +139,9 @@ assign gtBoxes imWidth imHeight anBoxes
             -- for each GT, the hightest overlapping anchor is FG.
             forM_ [0..numGT-1] $ \i -> do
                 -- let j = UV.maxIndex $ Repa.toUnboxed $ Repa.computeS $ Repa.slice overlaps (Z :. i :. All)
-                let j = argMax overlaps 0 i
-                -- traceShowM $ ("GT -> ", j)
-                UVM.write labels j 1
+                let s = Repa.computeUnboxedS $ slice overlaps 0 i
+                    m = s #! argMax s
+                UV.mapM_ (flip (UVM.write labels) 1) $ UV.findIndices (==m) (Repa.toUnboxed s)
 
             -- FG anchors that have overlapping with any GT >= thresh
             -- BG anchors that have overlapping with all GT < thresh
@@ -176,7 +176,7 @@ assign gtBoxes imWidth imHeight anBoxes
 
             -- compute the regression from each FG anchor to its gt
             -- let gts = UV.map (\i -> UV.maxIndex $ Repa.toUnboxed $ Repa.computeS $ Repa.slice overlaps (Z :. i :. All)) fgs
-            let gts = UV.map (argMax overlaps 1) fgs
+            let gts = UV.map (argMax . Repa.computeUnboxedS . slice overlaps 1) fgs
                 gtDiffs = UV.zipWith makeTarget fgs gts
             targets <- UVM.replicate numLabels (0, 0, 0, 0)
             UV.zipWithM_ (UVM.write targets) fgs gtDiffs
@@ -196,13 +196,12 @@ assign gtBoxes imWidth imHeight anBoxes
     numGT = V.length gtBoxes
     numLabels = V.length anBoxes
 
-    argMax :: Array U DIM2 Float -> Int -> Int -> Int
-    argMax mat axis ind =
-        let series = case axis of
-                       0 -> Repa.slice mat $ Z :. ind :. All
-                       1 -> Repa.slice mat $ Z :. All :. ind
-                       _ -> throw BadDimension
-        in UV.maxIndex $ Repa.toUnboxed $ Repa.computeS series
+    slice mat 0 ind = Repa.slice mat $ Z :. ind :. All
+    slice mat 1 ind = Repa.slice mat $ Z :. All :. ind
+    slice _ _ _ = throw BadDimension
+
+    argMax :: Array U DIM1 Float -> Int
+    argMax = UV.maxIndex . Repa.toUnboxed
 
     asTuple :: Array U DIM1 Float -> (Float, Float, Float, Float)
     asTuple box = (box #! 0, box #! 1, box #! 2, box #! 3)
