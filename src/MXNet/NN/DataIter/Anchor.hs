@@ -176,6 +176,8 @@ assign gtBoxes imWidth imHeight anBoxes
 
             -- compute the regression from each FG anchor to its gt
             -- let gts = UV.map (\i -> UV.maxIndex $ Repa.toUnboxed $ Repa.computeS $ Repa.slice overlaps (Z :. i :. All)) fgs
+            fgs <- UV.findIndices (==1) <$> UV.unsafeFreeze labels
+            bgs <- UV.findIndices (==0) <$> UV.unsafeFreeze labels
             let gts = UV.map (argMax . Repa.computeUnboxedS . slice overlaps 1) fgs
                 gtDiffs = UV.zipWith makeTarget fgs gts
             targets <- UVM.replicate numLabels (0, 0, 0, 0)
