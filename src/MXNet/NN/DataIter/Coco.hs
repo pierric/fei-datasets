@@ -4,7 +4,8 @@
 module MXNet.NN.DataIter.Coco(
     module MXNet.NN.DataIter.Common,
     Configuration(..), CocoConfig, conf_width, Coco(..),
-    classes, coco, cocoImages, cocoImagesAndBBoxes, loadImageAndBBoxes
+    classes, coco, cocoImages, cocoImagesAndBBoxes,
+    loadImage, loadImageAndBBoxes
 ) where
 
 import Data.Maybe (catMaybes)
@@ -115,6 +116,31 @@ cocoImagesAndBBoxes shuffle =
     concurrentMapM_numCaps 16 loadImageAndBBoxes .|
     C.catMaybes
 
+-- TODO: lift the common code
+loadImage :: (MonadReader CocoConfig m, MonadIO m) => Image -> m (Maybe (String, ImageTensor, ImageInfo))
+loadImage img = do
+    Coco base datasplit inst <- view conf_coco
+    width <- view conf_width
+
+    let imgFilePath = base </> datasplit </> img ^. img_file_name
+    imgRGB <- raiseLeft (FileNotFound imgFilePath) <$> liftIO (HIP.readImage imgFilePath)
+
+    let (imgH, imgW) = HIP.dims (imgRGB :: HIP.Image HIP.VS HIP.RGB Double)
+        imgH_  = fromIntegral imgH
+        imgW_  = fromIntegral imgW
+        width_ = fromIntegral width
+        (scale, imgW', imgH') = if imgW >= imgH
+            then (width_ / imgW_, width, floor (imgH_ * width_ / imgW_))
+            else (width_ / imgH_, floor (imgW_ * width_ / imgH_), width)
+        imgInfo = fromListUnboxed (Z :. 3) [fromIntegral imgH', fromIntegral imgW', scale]
+
+        imgResized = HIP.resize HIP.Bilinear HIP.Edge (imgH', imgW') imgRGB
+        imgPadded  = HIP.canvasSize (HIP.Fill $ HIP.PixelRGB 0.5 0.5 0.5) (width, width) imgResized
+        imgRepa    = Repa.fromUnboxed (Z:.width:.width:.3) $ SV.convert $ SV.unsafeCast $ HIP.toVector imgPadded
+
+    imgEval <- transform $ Repa.map double2Float imgRepa
+    -- deepSeq the array so that the workload are well parallelized.
+    return $!! Just (img ^. img_file_name, Repa.computeUnboxedS imgEval, imgInfo)
 
 loadImageAndBBoxes :: (MonadReader CocoConfig m, MonadIO m) => Image -> m (Maybe (String, ImageTensor, ImageInfo, GTBoxes))
 loadImageAndBBoxes img = do
