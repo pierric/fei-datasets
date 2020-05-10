@@ -7,6 +7,15 @@
 module Main where
 
 import GHC.TypeLits (Symbol)
+import RIO
+import RIO.FilePath
+import qualified RIO.Text as T
+import qualified RIO.Vector.Boxed as V
+import qualified RIO.Vector.Boxed.Partial as V ((!))
+import qualified RIO.Vector.Storable as SV
+import qualified Data.Vector.Storable as SV (unsafeCast)
+import qualified RIO.Vector.Unboxed as UV
+
 import Options.Applicative (
     Parser, execParser,
     long, value, option, auto, strOption, switch, metavar, showDefault, eitherReader, help,
@@ -15,28 +24,18 @@ import Data.Attoparsec.Text (sepBy, char, rational, decimal, endOfInput, parseOn
 import Data.Conduit
 import qualified Data.Conduit.Combinators as C (mapM, mapM_, take, map)
 import qualified Data.Conduit.List as C (catMaybes)
-import qualified Data.Text as T
-import qualified Data.Vector as V
-import qualified Data.Vector.Storable as SV
-import qualified Data.Vector.Unboxed as UV
 import qualified Data.Array.Repa as Repa
 import Data.Array.Repa ((:.)(..), Z (..))
-import Control.Applicative
-import Control.Monad.Reader
 import Control.Monad.Trans.Resource
-import Control.Lens (view, Getting)
 import qualified Graphics.Image as HIP
 import qualified Graphics.Image.Interface as HIP
 import Graphics.Rasterific
 import Graphics.Rasterific.Texture (uniformTexture)
 import Graphics.Text.TrueType
 import Codec.Picture.Types
-import System.FilePath
 import MXNet.NN.DataIter.Common
 import qualified MXNet.NN.DataIter.PascalVOC as DV
 import qualified MXNet.NN.DataIter.Coco as DC
-
-import Debug.Trace
 
 data Args = Args {
     arg_dataset :: String,
@@ -68,16 +67,16 @@ cmdArgParser = Args <$> strOption        (long "dataset" <> metavar "DATASET" <>
         return (a, b, c)
     floatList = eitherReader (parseOnly triple . T.pack)
 
-class HasImageWidth (a :: Symbol) where
+class HasWidth (a :: Symbol) where
     targetWidth :: Getting Int (Configuration a) Int
 
-instance HasImageWidth "voc" where
+instance HasWidth "voc" where
     targetWidth = DV.conf_width
 
-instance HasImageWidth "coco" where
+instance HasWidth "coco" where
     targetWidth = DC.conf_width
 
-renderWithBBox :: (HasImageWidth s, ImageDataset s, MonadReader (Configuration s) m, MonadIO m) =>
+renderWithBBox :: (HasWidth s, ImageDataset s, MonadReader (Configuration s) m, MonadIO m) =>
     Font -> (String, V.Vector String, ImageTensor, ImageInfo, GTBoxes) -> m (String, HIP.Image HIP.VS HIP.RGBA HIP.Word8)
 renderWithBBox font (ident, cls, img, info, gt) = do
     width <- view targetWidth
@@ -115,7 +114,7 @@ main = do
         Right a -> return a
     Args{..} <- execParser $ info (cmdArgParser <**> helper) fullDesc
     let save (ident, img) = liftIO $ HIP.writeImageExact HIP.PNG [] (ident <.> "png") img
-        dump :: (HasImageWidth s, ImageDataset s, MonadReader (Configuration s) m, MonadIO m) =>
+        dump :: (HasWidth s, ImageDataset s, MonadReader (Configuration s) m, MonadIO m) =>
                 ConduitT (String, V.Vector String, ImageTensor, ImageInfo, GTBoxes) Void m ()
         dump = C.take arg_num_imgs .|
                C.mapM (renderWithBBox font) .|

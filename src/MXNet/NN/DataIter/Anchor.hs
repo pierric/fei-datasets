@@ -1,16 +1,21 @@
 {-# LANGUAGE TemplateHaskell #-}
 module MXNet.NN.DataIter.Anchor where
 
-import qualified Data.IntSet as Set
-import Control.Exception
-import qualified Data.Vector as V
-import qualified Data.Vector.Unboxed as UV
+import RIO
+import qualified RIO.Set as Set
+import qualified RIO.Vector.Boxed as V
+import qualified RIO.Vector.Boxed.Unsafe as V
+import qualified RIO.Vector.Unboxed as UV
+import qualified RIO.Vector.Unboxed.Unsafe as UV (unsafeFreeze)
+import qualified RIO.Vector.Unboxed.Partial as UV (maxIndex)
 import qualified Data.Vector.Unboxed.Mutable as UVM
-import Control.Lens (view, makeLenses)
-import Control.Monad.Reader
+import Control.Lens (makeLenses)
+import Control.Exception (throw)
 import Data.Random (shuffleN, runRVar, StdRandom(..))
 import Data.Array.Repa (Array, DIM1, DIM2, D, U, (:.)(..), Z (..), All(..), (+^), fromListUnboxed)
 import qualified Data.Array.Repa as Repa
+
+import MXNet.NN.Utils.Repa
 
 data AnchorError = BadDimension
   deriving Show
@@ -33,8 +38,6 @@ makeLenses ''Configuration
 anchors :: MonadReader Configuration m =>
     Int -> Int -> Int -> m (V.Vector (Anchor U))
 anchors stride width height = do
-    scales <- view conf_anchor_scales
-    ratios <- view conf_anchor_ratios
     base   <- baseAnchors stride
     return $ V.fromList
         [ Repa.computeS $ anch +^ offs
@@ -74,27 +77,24 @@ mkanchor x y w h = fromListUnboxed (Z :. 4) [x - hW, y - hH, x + hW, y + hH]
     hW = 0.5 * (w - 1)
     hH = 0.5 * (h - 1)
 
-(#!) :: Array U DIM1 Float -> Int -> Float
-(#!) = Repa.unsafeLinearIndex
-
 (%!) :: V.Vector a -> Int -> a
-(%!) = (V.!)
+(%!) = (V.unsafeIndex)
 
-overlapMatrix :: Set.IntSet -> V.Vector (GTBox U) -> V.Vector (Anchor U) -> Array D DIM2 Float
+overlapMatrix :: Set Int -> V.Vector (GTBox U) -> V.Vector (Anchor U) -> Array D DIM2 Float
 overlapMatrix goodIndices gtBoxes anBoxes = Repa.fromFunction (Z :. width :. height) calcOvp
   where
     width = V.length gtBoxes
     height = V.length anBoxes
 
-    calcArea box = (box #! 2 - box #! 0 + 1) * (box #! 3 - box #! 1 + 1)
+    calcArea box = (box ^#! 2 - box ^#! 0 + 1) * (box ^#! 3 - box ^#! 1 + 1)
     areaA = V.map calcArea anBoxes
     areaG = V.map calcArea gtBoxes
 
     calcOvp (Z :. ig :. ia) =
         let gt = gtBoxes %! ig
             anchor = anBoxes %! ia
-            iw = min (gt #! 2) (anchor #! 2) - max (gt #! 0) (anchor #! 0)
-            ih = min (gt #! 3) (anchor #! 3) - max (gt #! 1) (anchor #! 1)
+            iw = min (gt ^#! 2) (anchor ^#! 2) - max (gt ^#! 0) (anchor ^#! 0)
+            ih = min (gt ^#! 3) (anchor ^#! 3) - max (gt ^#! 1) (anchor ^#! 1)
             areaI = iw * ih
             areaU = areaA %! ia + areaG %! ig - areaI
         in if Set.member ia goodIndices && iw > 0 && ih > 0 then areaI / areaU else 0
@@ -138,9 +138,8 @@ assign gtBoxes imWidth imHeight anBoxes
             overlaps <- return $ Repa.computeUnboxedS $ overlapMatrix goodIndices gtBoxes anBoxes
             -- for each GT, the hightest overlapping anchor is FG.
             forM_ [0..numGT-1] $ \i -> do
-                -- let j = UV.maxIndex $ Repa.toUnboxed $ Repa.computeS $ Repa.slice overlaps (Z :. i :. All)
                 let s = Repa.computeUnboxedS $ slice overlaps 0 i
-                    m = s #! argMax s
+                    m = s ^#! argMax s
                 UV.mapM_ (flip (UVM.write labels) 1) $ UV.findIndices (==m) (Repa.toUnboxed s)
 
             -- FG anchors that have overlapping with any GT >= thresh
@@ -175,10 +174,8 @@ assign gtBoxes imWidth imHeight anBoxes
                     flip (UVM.write labels) (-1)
 
             -- compute the regression from each FG anchor to its gt
-            -- let gts = UV.map (\i -> UV.maxIndex $ Repa.toUnboxed $ Repa.computeS $ Repa.slice overlaps (Z :. i :. All)) fgs
             fgs <- UV.findIndices (==1) <$> UV.unsafeFreeze labels
-            bgs <- UV.findIndices (==0) <$> UV.unsafeFreeze labels
-            let gts = UV.map (argMax . Repa.computeUnboxedS . slice overlaps 1) fgs
+            let gts = UV.map (argMax . Repa.computeS . slice overlaps 1) fgs
                 gtDiffs = UV.zipWith makeTarget fgs gts
             targets <- UVM.replicate numLabels (0, 0, 0, 0)
             UV.zipWithM_ (UVM.write targets) fgs gtDiffs
@@ -195,9 +192,13 @@ assign gtBoxes imWidth imHeight anBoxes
                 weightsRepa = Repa.fromUnboxed (Z:.numLabels:.4) (flattenT weights)
             return (labelsRepa, targetsRepa, weightsRepa)
   where
-    numGT = V.length gtBoxes
-    numLabels = V.length anBoxes
+    numGT = length gtBoxes :: Int
+    numLabels = length anBoxes :: Int
 
+    --
+    -- TODO: replace slice and argMax with the one from Utils
+    --
+    slice :: _ -> Int -> Int -> _
     slice mat 0 ind = Repa.slice mat $ Z :. ind :. All
     slice mat 1 ind = Repa.slice mat $ Z :. All :. ind
     slice _ _ _ = throw BadDimension
@@ -206,9 +207,9 @@ assign gtBoxes imWidth imHeight anBoxes
     argMax = UV.maxIndex . Repa.toUnboxed
 
     asTuple :: Array U DIM1 Float -> (Float, Float, Float, Float)
-    asTuple box = (box #! 0, box #! 1, box #! 2, box #! 3)
+    asTuple box = (box ^#! 0, box ^#! 1, box ^#! 2, box ^#! 3)
 
-    filterGoodIndices :: MonadReader Configuration m => m Set.IntSet
+    filterGoodIndices :: MonadReader Configuration m => m (Set Int)
     filterGoodIndices = do
         _allowed_border <- fromIntegral <$> view conf_allowed_border
         let goodAnchor (x0, y0, x1, y1) =

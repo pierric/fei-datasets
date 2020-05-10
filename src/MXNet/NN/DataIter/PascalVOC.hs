@@ -1,34 +1,30 @@
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE UndecidableInstances #-}
 module MXNet.NN.DataIter.PascalVOC (
     module MXNet.NN.DataIter.Common,
     Configuration(..), VOCConfig, conf_width,
     classes, vocMainImages, loadImageAndBBoxes
 ) where
-import qualified Data.Text as T
-import qualified Data.Text.IO as T
-import qualified Data.ByteString as B
-import Data.Maybe (catMaybes)
+
+import RIO
+import RIO.FilePath
+import qualified RIO.Text as T
+import qualified RIO.ByteString as B
+import qualified RIO.Vector.Boxed as V
+import qualified RIO.Vector.Storable as SV
+import qualified Data.Vector.Storable as SV (unsafeCast)
 import Text.XML.Expat.Proc
 import Text.XML.Expat.Tree
 import Data.Conduit
 import qualified Data.Conduit.List as C
-import Data.Array.Repa (Array, DIM1, DIM3, U, D, (:.)(..), Z (..),
-    fromListUnboxed, (-^), (+^), (*^), (/^))
+import Data.Array.Repa ((:.)(..), Z (..), fromListUnboxed)
 import qualified Data.Array.Repa as Repa
-import Data.Array.Repa.Repr.Unboxed (Unbox)
-import qualified Data.Vector as V
-import qualified Data.Vector.Storable as SV
 import qualified Data.Conduit.Combinators as C (yieldMany)
 import qualified Data.Random as RND (shuffleN, runRVar, StdRandom(..))
 import qualified Graphics.Image as HIP
 import qualified Graphics.Image.Interface as HIP
-import Control.Lens ((^.), view, makeLenses)
-import Control.Monad.Reader (MonadReader)
-import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.DeepSeq (($!!), NFData(..))
-import Control.Exception (Exception, throw)
-import System.FilePath
+import Control.Lens (makeLenses)
+import Control.Exception (throw)
 import GHC.Float (double2Float)
 
 import MXNet.NN.DataIter.Common
@@ -56,16 +52,20 @@ makeLenses 'VOCConfig
 
 type VOCConfig = Configuration "voc"
 
+instance HasDatasetConfig VOCConfig where
+    type DatasetTag VOCConfig = "voc"
+    datasetConfig = id
+
 instance ImageDataset "voc" where
     imagesMean = conf_mean
     imagesStdDev = conf_std
 
-vocMainImages :: (MonadReader VOCConfig m, MonadIO m) =>
+vocMainImages :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "voc", MonadIO m) =>
     String -> Bool -> ConduitT () String m ()
 vocMainImages datasplit shuffle = do
-    base <- view conf_base_dir
+    base <- view (datasetConfig . conf_base_dir)
     let imageset = base </> "ImageSets" </> "Main" </> datasplit <.> "txt"
-    content <- liftIO $ T.readFile imageset
+    content <- readFileUtf8 imageset
     let image_list = T.lines content
     all_images <- if shuffle then
                     liftIO $ RND.runRVar (RND.shuffleN (length image_list) image_list) RND.StdRandom
@@ -73,14 +73,14 @@ vocMainImages datasplit shuffle = do
                     return $ image_list
     C.yieldMany all_images .| C.map T.unpack
 
-loadImageAndBBoxes :: (MonadReader VOCConfig m, MonadIO m) =>
+loadImageAndBBoxes :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "voc", MonadIO m) =>
     String -> m (Maybe (String, ImageTensor, ImageInfo, GTBoxes))
 loadImageAndBBoxes ident = do
-    width <- view conf_width
-    base <- view conf_base_dir
+    width <- view (datasetConfig . conf_width)
+    base <- view (datasetConfig . conf_base_dir)
 
     let imgFilePath = base </> "JPEGImages" </> ident <.> "jpg"
-    imgRGB <- raiseLeft (FileNotFound imgFilePath) <$> liftIO
+    imgRGB <- liftIO $ raiseLeft (FileNotFound imgFilePath) $
         (HIP.readImageExact HIP.JPG imgFilePath)
 
     let (imgH, imgW) = HIP.dims (imgRGB :: HIP.Image HIP.VS HIP.RGB Double)
@@ -94,7 +94,10 @@ loadImageAndBBoxes ident = do
 
         imgResized = HIP.resize HIP.Bilinear HIP.Edge (imgH', imgW') imgRGB
         imgPadded  = HIP.canvasSize (HIP.Fill $ HIP.PixelRGB 0.5 0.5 0.5) (width, width) imgResized
-        imgRepa    = Repa.fromUnboxed (Z:.width:.width:.3) $ SV.convert $ SV.unsafeCast $ HIP.toVector imgPadded
+        imgRepa    = Repa.fromUnboxed (Z:.width:.width:.3) $
+                        SV.convert $
+                        SV.unsafeCast $
+                        HIP.toVector imgPadded
 
     let annoFilePath = base </> "Annotations" </> ident <.> "xml"
     xml <- liftIO $ B.readFile annoFilePath
