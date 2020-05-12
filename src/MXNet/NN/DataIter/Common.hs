@@ -1,16 +1,12 @@
 {-# LANGUAGE DataKinds #-}
 module MXNet.NN.DataIter.Common where
 
+import RIO
+import qualified RIO.Vector.Boxed as V
 import GHC.TypeLits (Symbol)
-import Data.Array.Repa (Array, DIM1, DIM3, D, U, (:.)(..), Z (..), Any(..),
+import Data.Array.Repa (Array, DIM1, DIM3, D, U, (:.)(..), Z (..),
     fromListUnboxed, (-^), (+^), (*^), (/^))
 import qualified Data.Array.Repa as Repa
-import Data.Array.Repa.Repr.Unboxed (Unbox)
-import qualified Data.Vector as V
-import Control.Lens ((^.), view, makeLenses, Getting)
-import Control.DeepSeq
-import Control.Exception
-import Control.Monad.Reader
 
 type ImageTensor = Array U DIM3 Float
 type ImageInfo = Array U DIM1 Float
@@ -22,12 +18,19 @@ class ImageDataset (a :: Symbol) where
     imagesMean :: Getting (Float, Float, Float) (Configuration a) (Float, Float, Float)
     imagesStdDev :: Getting (Float, Float, Float) (Configuration a) (Float, Float, Float)
 
+class HasDatasetConfig env where
+    type DatasetTag env :: Symbol
+    datasetConfig :: Lens' env (Configuration (DatasetTag env))
+
 -- transform HWC -> CHW
-transform :: (ImageDataset s, MonadReader (Configuration s) m, Repa.Source r Float) =>
-    Array r DIM3 Float -> m (Array D DIM3 Float)
+transform :: (HasDatasetConfig env,
+              ImageDataset (DatasetTag env),
+              MonadReader env m,
+              Repa.Source r Float)
+    => Array r DIM3 Float -> m (Array D DIM3 Float)
 transform img = do
-    mean <- view imagesMean
-    std <- view imagesStdDev
+    mean <- view (datasetConfig . imagesMean)
+    std  <- view (datasetConfig . imagesStdDev)
     let broadcast = Repa.extend (Repa.Any :. height :. width)
         mean' = broadcast $ fromTuple mean
         std'  = broadcast $ fromTuple std
@@ -54,8 +57,8 @@ transformInv img = do
 
 fromTuple (a, b, c) = fromListUnboxed (Z :. (3 :: Int)) [a,b,c]
 
-raiseLeft :: Exception e => (a -> e) -> Either a b -> b
-raiseLeft exc = either (throw . exc) id
+raiseLeft :: (MonadThrow m, Exception e) => (a -> e) -> m (Either a b) -> m b
+raiseLeft exc act = act >>= either (throwM . exc) return
 
 instance (Repa.Shape sh, Unbox e) => NFData (Array U sh e) where
     rnf arr = Repa.deepSeqArray arr ()

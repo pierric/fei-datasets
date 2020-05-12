@@ -1,3 +1,4 @@
+import RIO
 import Criterion.Main
 import Criterion.Main.Options
 import Data.Conduit
@@ -7,8 +8,6 @@ import qualified Codec.Picture.Repa as RPJ
 import qualified Codec.Picture as JUC
 import qualified Codec.Picture.Extra as JUC
 import qualified Data.Array.Repa as Repa
-import Control.Monad.IO.Class
-import Control.Monad.Reader
 import Control.Monad.Trans.Resource
 
 import qualified MXNet.NN.DataIter.Coco as Coco

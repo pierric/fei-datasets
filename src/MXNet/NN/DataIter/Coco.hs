@@ -1,6 +1,6 @@
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE UndecidableInstances #-}
 module MXNet.NN.DataIter.Coco(
     module MXNet.NN.DataIter.Common,
     Configuration(..), CocoConfig, conf_width, Coco(..),
@@ -8,34 +8,29 @@ module MXNet.NN.DataIter.Coco(
     loadImage, loadImageAndBBoxes
 ) where
 
-import Data.Maybe (catMaybes)
-import System.FilePath
-import System.Directory
+import RIO
+import qualified RIO.ByteString as SBS
+import qualified RIO.Vector.Boxed as V
+import qualified RIO.Vector.Storable as SV
+import qualified Data.Vector.Storable as SV (unsafeCast)
+import qualified RIO.Map as M
+import RIO.FilePath
+import RIO.Directory
 import GHC.Generics (Generic)
 import GHC.Float (double2Float)
-import qualified Data.ByteString as SBS
 import qualified Data.Store as Store
-import Control.Exception
-import Data.Array.Repa (Array, DIM1, DIM3, D, U, (:.)(..), Z (..), Any(..),
-    fromListUnboxed, extent, backpermute, extend, (-^), (+^), (*^), (/^))
+import Data.Array.Repa ((:.)(..), Z(..), fromListUnboxed)
 import qualified Data.Array.Repa as Repa
-import Data.Array.Repa.Repr.Unboxed (Unbox)
-import qualified Data.Vector as V
-import qualified Data.Vector.Storable as SV
 import qualified Graphics.Image as HIP
 import qualified Graphics.Image.Interface as HIP
 import qualified Data.Aeson as Aeson
-import Control.Lens ((^.), view, makeLenses)
+import Control.Lens (makeLenses, (^?!), ix)
 import Data.Conduit
 import qualified Data.Conduit.Combinators as C (yieldMany)
 import qualified Data.Conduit.List as C
-import Control.Monad.Reader
-import qualified Data.IntMap.Strict as M
-import Data.Maybe (fromJust)
 import qualified Data.Random as RND (shuffleN, runRVar, StdRandom(..))
 import Data.Conduit.ConcurrentMap (concurrentMapM_numCaps)
 import Control.Monad.Trans.Resource
-import Control.DeepSeq
 
 import MXNet.Coco.Types
 import MXNet.NN.DataIter.Common
@@ -75,6 +70,10 @@ data instance Configuration "coco" = CocoConfig {
 makeLenses 'CocoConfig
 type CocoConfig = Configuration "coco"
 
+instance HasDatasetConfig CocoConfig where
+    type DatasetTag CocoConfig = "coco"
+    datasetConfig = id
+
 instance ImageDataset "coco" where
     imagesMean = conf_mean
     imagesStdDev = conf_std
@@ -95,19 +94,21 @@ cached name action = do
 coco :: String -> String -> IO Coco
 coco base datasplit = cached (datasplit ++ ".store") $ do
     let annotationFile = base </> "annotations" </> ("instances_" ++ datasplit ++ ".json")
-    inst <- raiseLeft (FileNotFound annotationFile) <$> Aeson.eitherDecodeFileStrict' annotationFile
+    inst <- raiseLeft (FileNotFound annotationFile) $ Aeson.eitherDecodeFileStrict' annotationFile
     return $ Coco base datasplit inst
 
 
-cocoImages :: (MonadReader CocoConfig m, MonadIO m) => Bool -> ConduitT () Image m ()
+cocoImages :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
+    => Bool -> ConduitT () Image m ()
 cocoImages shuffle = do
-    Coco _ _ inst <- view conf_coco
+    Coco _ _ inst <- view (datasetConfig . conf_coco)
     let all_images = inst ^. images
-    all_images <- if shuffle then
-                    liftIO $ RND.runRVar (RND.shuffleN (length all_images) (V.toList all_images)) RND.StdRandom
-                  else
-                    return $ V.toList all_images
-    C.yieldMany all_images -- .| C.iterM (liftIO . print)
+    all_images_shuffle <- liftIO $
+        if shuffle then
+            RND.runRVar (RND.shuffleN (length all_images) (V.toList all_images)) RND.StdRandom
+        else
+            return $ V.toList all_images
+    C.yieldMany all_images_shuffle -- .| C.iterM (liftIO . print)
 
 
 cocoImagesAndBBoxes :: Bool -> ConduitT () (String, ImageTensor, ImageInfo, GTBoxes) (ReaderT CocoConfig (ResourceT IO)) ()
@@ -117,13 +118,14 @@ cocoImagesAndBBoxes shuffle =
     C.catMaybes
 
 -- TODO: lift the common code
-loadImage :: (MonadReader CocoConfig m, MonadIO m) => Image -> m (Maybe (String, ImageTensor, ImageInfo))
+loadImage :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
+    => Image -> m (Maybe (String, ImageTensor, ImageInfo))
 loadImage img = do
-    Coco base datasplit inst <- view conf_coco
-    width <- view conf_width
+    Coco base datasplit _ <- view (datasetConfig . conf_coco)
+    width <- view (datasetConfig . conf_width)
 
     let imgFilePath = base </> datasplit </> img ^. img_file_name
-    imgRGB <- raiseLeft (FileNotFound imgFilePath) <$> liftIO (HIP.readImage imgFilePath)
+    imgRGB <- liftIO $ raiseLeft (FileNotFound imgFilePath) $ HIP.readImage imgFilePath
 
     let (imgH, imgW) = HIP.dims (imgRGB :: HIP.Image HIP.VS HIP.RGB Double)
         imgH_  = fromIntegral imgH
@@ -136,17 +138,25 @@ loadImage img = do
 
         imgResized = HIP.resize HIP.Bilinear HIP.Edge (imgH', imgW') imgRGB
         imgPadded  = HIP.canvasSize (HIP.Fill $ HIP.PixelRGB 0.5 0.5 0.5) (width, width) imgResized
-        imgRepa    = Repa.fromUnboxed (Z:.width:.width:.3) $ SV.convert $ SV.unsafeCast $ HIP.toVector imgPadded
+        imgRepa    = Repa.fromUnboxed (Z:.width:.width:.3) $
+                        SV.convert $
+                        SV.unsafeCast $
+                        HIP.toVector imgPadded
 
     imgEval <- transform $ Repa.map double2Float imgRepa
     -- deepSeq the array so that the workload are well parallelized.
     return $!! Just (img ^. img_file_name, Repa.computeUnboxedS imgEval, imgInfo)
 
-loadImageAndBBoxes :: (MonadReader CocoConfig m, MonadIO m) => Image -> m (Maybe (String, ImageTensor, ImageInfo, GTBoxes))
+loadImageAndBBoxes :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
+    => Image -> m (Maybe (String, ImageTensor, ImageInfo, GTBoxes))
 loadImageAndBBoxes img = do
-    Coco base datasplit inst <- view conf_coco
+    Coco base datasplit inst <- view (datasetConfig . conf_coco)
     -- map each category from id to its index in the classes.
-    let catTabl = M.fromList $ V.toList $ V.map (\cat -> (cat ^. odc_id, fromJust $ V.elemIndex (cat ^. odc_name) classes)) (inst ^. categories)
+    let get_cat_index (flip V.elemIndex classes -> Just index) = index
+        get_cat_index _ = error "index not found in classes"
+        catTabl = M.fromList $ V.toList $ V.map
+                    (\cat -> (cat ^. odc_id, get_cat_index (cat ^. odc_name)))
+                    (inst ^. categories)
         -- get all the bbox and gt for the image
         get_gt_boxes scale img = V.fromList $ catMaybes $ map (makeGTBox img scale) $ V.toList imgAnns
           where
@@ -154,16 +164,16 @@ loadImageAndBBoxes img = do
             imgAnns = V.filter (\ann -> ann ^. ann_image_id == imageId) (inst ^. annotations)
         makeGTBox img scale ann =
             let (x0, y0, x1, y1) = cleanBBox img (ann ^. ann_bbox)
-                classId = catTabl M.! (ann ^. ann_category_id)
+                classId = catTabl ^?! ix (ann ^. ann_category_id)
             in
             if ann ^. ann_area > 0 && x1 > x0 && y1 > y0
-              then Just $ fromListUnboxed (Z :. 5) [x0*scale, y0*scale, x1*scale, y1*scale, fromIntegral classId]
-              else Nothing
+                then Just $ fromListUnboxed (Z :. 5) [x0*scale, y0*scale, x1*scale, y1*scale, fromIntegral classId]
+                else Nothing
 
-    width <- view conf_width
+    width <- view (datasetConfig . conf_width)
 
     let imgFilePath = base </> datasplit </> img ^. img_file_name
-    imgRGB <- raiseLeft (FileNotFound imgFilePath) <$> liftIO (HIP.readImage imgFilePath)
+    imgRGB <- liftIO $ raiseLeft (FileNotFound imgFilePath) $ HIP.readImage imgFilePath
 
     let (imgH, imgW) = HIP.dims (imgRGB :: HIP.Image HIP.VS HIP.RGB Double)
         imgH_  = fromIntegral imgH
@@ -176,7 +186,10 @@ loadImageAndBBoxes img = do
 
         imgResized = HIP.resize HIP.Bilinear HIP.Edge (imgH', imgW') imgRGB
         imgPadded  = HIP.canvasSize (HIP.Fill $ HIP.PixelRGB 0.5 0.5 0.5) (width, width) imgResized
-        imgRepa    = Repa.fromUnboxed (Z:.width:.width:.3) $ SV.convert $ SV.unsafeCast $ HIP.toVector imgPadded
+        imgRepa    = Repa.fromUnboxed (Z:.width:.width:.3) $
+                        SV.convert $
+                        SV.unsafeCast $
+                        HIP.toVector imgPadded
         gt_boxes   = get_gt_boxes scale img
 
     if V.null gt_boxes
