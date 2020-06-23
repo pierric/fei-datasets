@@ -1,0 +1,8 @@
+cradle:
+  stack:
+    - path: "./src"
+      component: "fei-datasets:lib"
+    - path: "./utils/render.hs"
+      component: "fei-datasets:exe:render"
+    - path: "./utils/bench.hs"
+      component: "fei-datasets:exe:bench"
