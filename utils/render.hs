@@ -1,52 +1,54 @@
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DataKinds         #-}
+{-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE KindSignatures    #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
 module Main where
 
-import GHC.TypeLits (Symbol)
-import RIO
-import RIO.FilePath
-import qualified RIO.Text as T
-import qualified RIO.Vector.Boxed as V
-import qualified RIO.Vector.Boxed.Partial as V ((!))
-import qualified RIO.Vector.Storable as SV
-import qualified Data.Vector.Storable as SV (unsafeCast)
-import qualified RIO.Vector.Unboxed as UV
+import qualified Data.Vector.Storable         as SV (unsafeCast)
+import           GHC.TypeLits                 (Symbol)
+import           RIO
+import           RIO.FilePath
+import qualified RIO.Text                     as T
+import qualified RIO.Vector.Boxed             as V
+import qualified RIO.Vector.Boxed.Partial     as V ((!))
+import qualified RIO.Vector.Storable          as SV
+import qualified RIO.Vector.Unboxed           as UV
 
-import Options.Applicative (
-    Parser, execParser,
-    long, value, option, auto, strOption, switch, metavar, showDefault, eitherReader, help,
-    info, helper, fullDesc, header, (<**>))
-import Data.Attoparsec.Text (sepBy, char, rational, decimal, endOfInput, parseOnly)
-import Data.Conduit
-import qualified Data.Conduit.Combinators as C (mapM, mapM_, take, map)
-import qualified Data.Conduit.List as C (catMaybes)
-import qualified Data.Array.Repa as Repa
-import Data.Array.Repa ((:.)(..), Z (..))
-import Control.Monad.Trans.Resource
-import qualified Graphics.Image as HIP
-import qualified Graphics.Image.Interface as HIP
-import Graphics.Rasterific
-import Graphics.Rasterific.Texture (uniformTexture)
-import Graphics.Text.TrueType
-import Codec.Picture.Types
-import MXNet.NN.DataIter.Common
-import qualified MXNet.NN.DataIter.PascalVOC as DV
-import qualified MXNet.NN.DataIter.Coco as DC
+import           Codec.Picture.Types
+import           Control.Monad.Trans.Resource
+import           Data.Array.Repa              ((:.) (..), Z (..))
+import qualified Data.Array.Repa              as Repa
+import           Data.Attoparsec.Text         (char, decimal, endOfInput,
+                                               parseOnly, rational, sepBy)
+import           Data.Conduit
+import qualified Data.Conduit.Combinators     as C (map, mapM, mapM_, take)
+import qualified Data.Conduit.List            as C (catMaybes)
+import qualified Graphics.Image               as HIP
+import qualified Graphics.Image.Interface     as HIP
+import           Graphics.Rasterific
+import           Graphics.Rasterific.Texture  (uniformTexture)
+import           Graphics.Text.TrueType
+import qualified MXNet.NN.DataIter.Coco       as DC
+import           MXNet.NN.DataIter.Common
+import qualified MXNet.NN.DataIter.PascalVOC  as DV
+import           Options.Applicative          (Parser, auto, eitherReader,
+                                               execParser, fullDesc, header,
+                                               help, helper, info, long,
+                                               metavar, option, showDefault,
+                                               strOption, switch, value, (<**>))
 
-data Args = Args {
-    arg_dataset :: String,
-    arg_base_dir :: String,
-    arg_datasplit :: String,
-    arg_width :: Int,
-    arg_mean :: (Float, Float, Float),
-    arg_stddev :: (Float, Float, Float),
-    arg_num_imgs :: Int,
-    arg_shuffle :: Bool
-}
+data Args = Args
+    { arg_dataset   :: String
+    , arg_base_dir  :: String
+    , arg_datasplit :: String
+    , arg_width     :: Int
+    , arg_mean      :: (Float, Float, Float)
+    , arg_stddev    :: (Float, Float, Float)
+    , arg_num_imgs  :: Int
+    , arg_shuffle   :: Bool
+    }
 
 cmdArgParser = Args <$> strOption        (long "dataset" <> metavar "DATASET" <> help "dataset name")
                     <*> strOption        (long "base-dir" <> metavar "BASE" <> help "path to the root directory")
@@ -107,11 +109,11 @@ main = do
     let fontPath = findFontInCache fontCache (FontDescriptor "Hack" (FontStyle False False))
     fontPath <- case fontPath of
         Nothing -> error "font not found"
-        Just a -> return a
+        Just a  -> return a
     font <- loadFontFile fontPath
     font <- case font of
         Left msg -> error msg
-        Right a -> return a
+        Right a  -> return a
     Args{..} <- execParser $ info (cmdArgParser <**> helper) fullDesc
     let save (ident, img) = liftIO $ HIP.writeImageExact HIP.PNG [] (ident <.> "png") img
         dump :: (HasWidth s, ImageDataset s, MonadReader (Configuration s) m, MonadIO m) =>
@@ -123,7 +125,7 @@ main = do
         "coco" -> do
             coco <- DC.coco arg_base_dir arg_datasplit
             let conf = DC.CocoConfig coco arg_width arg_mean arg_stddev
-                iter = DC.cocoImagesAndBBoxes arg_shuffle
+                iter = DC.cocoImagesBBoxes arg_shuffle
             void $ runResourceT $ flip runReaderT conf $ runConduit $ iter .| C.map (lookupClassName DC.classes) .| dump
         "voc" -> do
             let conf = DV.VOCConfig arg_base_dir arg_width arg_mean arg_stddev
