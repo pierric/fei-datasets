@@ -1,16 +1,18 @@
 {-# LANGUAGE DataKinds #-}
 module MXNet.NN.DataIter.Common where
 
-import RIO
+import           Data.Array.Repa  ((:.) (..), Array, D, DIM1, DIM2, DIM3, U,
+                                   Z (..), fromListUnboxed, (*^), (+^), (-^),
+                                   (/^))
+import qualified Data.Array.Repa  as Repa
+import           GHC.TypeLits     (Symbol)
+import           RIO
 import qualified RIO.Vector.Boxed as V
-import GHC.TypeLits (Symbol)
-import Data.Array.Repa (Array, DIM1, DIM3, D, U, (:.)(..), Z (..),
-    fromListUnboxed, (-^), (+^), (*^), (/^))
-import qualified Data.Array.Repa as Repa
 
 type ImageTensor = Array U DIM3 Float
 type ImageInfo = Array U DIM1 Float
 type GTBoxes = V.Vector (Array U DIM1 Float)
+type Masks = V.Vector (Array U DIM2 Word8)
 
 data family Configuration (dataset :: Symbol)
 

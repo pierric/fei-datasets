@@ -88,6 +88,7 @@ Executable bench
                           repa,
                           hip,
                           rio,
+                          stm-conduit,
                           JuicyPixels,
                           JuicyPixels-repa,
                           JuicyPixels-extra
