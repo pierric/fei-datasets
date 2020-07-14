@@ -1,63 +1,69 @@
 {-# LANGUAGE TemplateHaskell #-}
 module MXNet.NN.DataIter.Anchor where
 
-import RIO
-import qualified RIO.Set as Set
-import qualified RIO.Vector.Boxed as V
-import qualified RIO.Vector.Boxed.Unsafe as V
-import qualified RIO.Vector.Unboxed as UV
-import qualified RIO.Vector.Unboxed.Unsafe as UV (unsafeFreeze)
-import qualified RIO.Vector.Unboxed.Partial as UV (maxIndex)
-import qualified Data.Vector.Unboxed.Mutable as UVM
-import Control.Lens (makeLenses)
-import Control.Exception (throw)
-import Data.Random (shuffleN, runRVar, StdRandom(..))
-import Data.Array.Repa (Array, DIM1, DIM2, D, U, (:.)(..), Z (..), All(..), (+^), fromListUnboxed)
-import qualified Data.Array.Repa as Repa
+import           Control.Exception            (throw)
+import           Control.Lens                 (ix, makeLenses, (^?!))
+import           Data.Array.Repa              ((:.) (..), All (..), Array, D,
+                                               DIM1, DIM2, U, Z (..),
+                                               fromListUnboxed, (+^))
+import qualified Data.Array.Repa              as Repa
+import           Data.Random                  (StdRandom (..), runRVar,
+                                               shuffleN)
+import qualified Data.Vector.Unboxed.Mutable  as UVM
+import           RIO
+import qualified RIO.HashMap                  as M
+import qualified RIO.Set                      as Set
+import qualified RIO.Vector.Boxed             as V
+import qualified RIO.Vector.Boxed.Unsafe      as V
+import qualified RIO.Vector.Unboxed           as UV
+import qualified RIO.Vector.Unboxed.Partial   as UV (maxIndex)
+import qualified RIO.Vector.Unboxed.Unsafe    as UV (unsafeFreeze)
 
-import MXNet.NN.Utils.Repa
+import           MXNet.Base
+import           MXNet.Base.Operators.NDArray (slice_like, _set_value_upd)
+import           MXNet.Base.ParserUtils       (decimal, list, parseR, rational,
+                                               tuple)
+import           MXNet.NN.NDArray             (copy)
+import           MXNet.NN.Utils.Repa          (vstack, (^#!))
+import qualified MXNet.NN.Utils.Repa          as Repa
 
 data AnchorError = BadDimension
-  deriving Show
+    deriving Show
 instance Exception AnchorError
 
 type Anchor r = Array r DIM1 Float
 type GTBox r = Array r DIM1 Float
 
-data Configuration = Configuration {
-    _conf_anchor_scales :: [Int],
-    _conf_anchor_ratios :: [Float],
-    _conf_allowed_border :: Int,
-    _conf_fg_num :: Int,
-    _conf_batch_num :: Int,
-    _conf_bg_overlap :: Float,
-    _conf_fg_overlap :: Float
-} deriving Show
+data Configuration = Configuration
+    { _conf_anchor_scales  :: [Int]
+    , _conf_anchor_ratios  :: [Float]
+    , _conf_allowed_border :: Int
+    , _conf_fg_num         :: Int
+    , _conf_batch_num      :: Int
+    , _conf_bg_overlap     :: Float
+    , _conf_fg_overlap     :: Float
+    }
+    deriving Show
 makeLenses ''Configuration
 
-anchors :: MonadReader Configuration m =>
-    Int -> Int -> Int -> m (V.Vector (Anchor U))
-anchors stride width height = do
-    base   <- baseAnchors stride
-    return $ V.fromList
+anchors :: (Int, Int) -> Int -> Int -> [Int] -> [Float] -> V.Vector (Anchor U)
+anchors (height, width) stride base_size scales ratios =
+    V.fromList
         [ Repa.computeS $ anch +^ offs
         | offY <- grid height
         , offX <- grid width
         , anch <- base
         , let offs = fromListUnboxed (Z :. 4) [offX, offY, offX, offY]]
   where
+    base = baseAnchors base_size scales ratios
     grid size = map fromIntegral [0, stride .. size * stride-1]
 
-baseAnchors :: MonadReader Configuration m =>
-    Int -> m ([Anchor U])
-baseAnchors size = do
-    scales <- view conf_anchor_scales
-    ratios <- view conf_anchor_ratios
-    return [makeBase s r | r <- ratios, s <- scales]
+baseAnchors :: Int -> [Int] -> [Float] -> [Anchor U]
+baseAnchors base_size scales ratios = [makeBase s r | r <- ratios, s <- scales]
   where
     makeBase :: Int -> Float -> Anchor U
     makeBase scale ratio =
-        let sizeF = fromIntegral size - 1
+        let sizeF = fromIntegral base_size - 1
             (w, h, x, y) = whctr (0, 0, sizeF, sizeF)
             ws = round $ sqrt (w * h / ratio) :: Int
             hs = round $ (fromIntegral ws) * ratio :: Int
@@ -132,12 +138,11 @@ assign gtBoxes imWidth imHeight anBoxes
 
         liftIO $ do
             -- TODO filter valid anchor boxes
-            -- TODO case when gtBoxes is empty.
             labels <- UVM.replicate numLabels (-1)
 
             overlaps <- return $ Repa.computeUnboxedS $ overlapMatrix goodIndices gtBoxes anBoxes
             -- for each GT, the hightest overlapping anchor is FG.
-            forM_ [0..numGT-1] $ \i -> do
+            forM_ ([0..numGT-1] :: [_]) $ \i -> do
                 let s = Repa.computeUnboxedS $ slice overlaps 0 i
                     m = s ^#! argMax s
                 UV.mapM_ (flip (UVM.write labels) 1) $ UV.findIndices (==m) (Repa.toUnboxed s)
@@ -201,7 +206,7 @@ assign gtBoxes imWidth imHeight anBoxes
     slice :: _ -> Int -> Int -> _
     slice mat 0 ind = Repa.slice mat $ Z :. ind :. All
     slice mat 1 ind = Repa.slice mat $ Z :. All :. ind
-    slice _ _ _ = throw BadDimension
+    slice _ _ _     = throw BadDimension
 
     argMax :: Array U DIM1 Float -> Int
     argMax = UV.maxIndex . Repa.toUnboxed
@@ -234,3 +239,68 @@ assign gtBoxes imWidth imHeight anBoxes
     flattenT :: UV.Vector (Float, Float, Float, Float) -> UV.Vector Float
     flattenT = UV.concatMap (\(a,b,c,d) -> UV.fromList [a,b,c,d])
 
+--
+-- Symbol for Anchor Generator
+--
+data AnchorGeneratorProp = AnchorGeneratorProp
+    { _ag_ratios        :: [Float]
+    , _ag_scales        :: [Int]
+    , _ag_anchors_alloc :: NDArray Float
+    }
+makeLenses ''AnchorGeneratorProp
+
+instance CustomOperationProp AnchorGeneratorProp where
+    prop_list_arguments _        = ["feature"]
+    prop_list_outputs _          = ["anchors"]
+    prop_list_auxiliary_states _ = []
+    prop_infer_shape prop [feature_shape] =
+        let STensor [_, _, h, w] = feature_shape
+            num_scales = length (prop ^. ag_scales)
+            num_ratios = length (prop ^. ag_ratios)
+            num_anchs  = num_scales * num_ratios * h * w
+            anchors_shape        = STensor [1, num_anchs, 4]
+        in ([feature_shape], [anchors_shape], [])
+    prop_declare_backward_dependency _ _ _ _ = []
+
+    data Operation AnchorGeneratorProp = AnchorGenerator AnchorGeneratorProp
+    prop_create_operator prop _ _ = return (AnchorGenerator prop)
+
+instance CustomOperation (Operation AnchorGeneratorProp) where
+    forward (AnchorGenerator prop) [ReqWrite] [feature] [anchors] _ _ = do
+        -- :param: feature, shape of (1, C, H, W)
+        -- :param: anchors, shape of (1, N, 4), where N is number of anchors
+
+        let alloc = prop ^. ag_anchors_alloc
+        ret <- sing slice_like (#data := unNDArray alloc .& #shape_like := feature .& #axes := [2,3] .& Nil)
+        void $ copy (NDArray ret :: NDArray Float) (NDArray anchors)
+
+    backward _ [ReqWrite] _ _ [in_grad_0] _ _ = do
+        _set_value_upd [in_grad_0] (#src := 0 .& Nil)
+
+buildAnchorGenerator :: [(Text, Text)] -> IO AnchorGeneratorProp
+buildAnchorGenerator params = do
+    let allocV = anchors alloc_size stride base_size scales ratios
+        -- convert from `Vector (Array [4])` -> Array [1, 1, N, 4]
+        allocR = expandD0 $ expandD0 $ vstack $ V.map expandD0 allocV
+        num_scales = length scales
+        num_ratios = length ratios
+        num_anchs  = num_scales * num_ratios * base_size * base_size
+
+    allocA <- makeEmptyNDArray [1, 1, num_anchs, 4] contextCPU
+    copyFromRepa allocA allocR
+
+    return $ AnchorGeneratorProp
+        { _ag_scales = scales
+        , _ag_ratios = ratios
+        , _ag_anchors_alloc = allocA
+        }
+  where
+    paramsM    = M.fromList params
+    stride     = parseR decimal         $ paramsM ^?! ix "stride"
+    scales     = parseR (list decimal)  $ paramsM ^?! ix "scales"
+    ratios     = parseR (list rational) $ paramsM ^?! ix "ratios"
+    base_size  = parseR decimal         $ paramsM ^?! ix "base_size"
+    alloc_size = parseR (tuple decimal) $ paramsM ^?! ix "alloc_size"
+
+expandD0 :: (Repa.Shape sh, UV.Unbox e) => Array U sh e -> Array U (sh :. Int) e
+expandD0 = Repa.expandDim 0

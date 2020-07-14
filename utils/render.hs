@@ -130,5 +130,5 @@ main = do
         "voc" -> do
             let conf = DV.VOCConfig arg_base_dir arg_width arg_mean arg_stddev
                 iter = DV.vocMainImages arg_datasplit arg_shuffle .| C.mapM DV.loadImageAndBBoxes .| C.catMaybes
-            void $ flip runReaderT conf $ runConduit $ iter .| C.map (lookupClassName DV.classes) .| dump
+            void $ flip runReaderT conf $ runConduit $ iter .| C.map (lookupClassName $ V.map T.unpack DV.classes) .| dump
 

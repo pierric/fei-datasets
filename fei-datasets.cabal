@@ -23,6 +23,8 @@ Library
     default-extensions:     GADTs,
                             TypeFamilies,
                             OverloadedLabels,
+                            OverloadedLists,
+                            OverloadedStrings,
                             FlexibleContexts,
                             FlexibleInstances,
                             StandaloneDeriving,
