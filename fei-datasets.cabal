@@ -23,6 +23,8 @@ Library
     default-extensions:     GADTs,
                             TypeFamilies,
                             OverloadedLabels,
+                            OverloadedLists,
+                            OverloadedStrings,
                             FlexibleContexts,
                             FlexibleInstances,
                             StandaloneDeriving,
@@ -88,6 +90,7 @@ Executable bench
                           repa,
                           hip,
                           rio,
+                          stm-conduit,
                           JuicyPixels,
                           JuicyPixels-repa,
                           JuicyPixels-extra

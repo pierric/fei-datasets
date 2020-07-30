@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TemplateHaskell      #-}
 {-# LANGUAGE UndecidableInstances #-}
 module MXNet.NN.DataIter.PascalVOC (
     module MXNet.NN.DataIter.Common,
@@ -6,34 +6,37 @@ module MXNet.NN.DataIter.PascalVOC (
     classes, vocMainImages, loadImageAndBBoxes
 ) where
 
-import RIO
-import RIO.FilePath
-import qualified RIO.Text as T
-import qualified RIO.ByteString as B
-import qualified RIO.Vector.Boxed as V
-import qualified RIO.Vector.Storable as SV
-import qualified Data.Vector.Storable as SV (unsafeCast)
-import Text.XML.Expat.Proc
-import Text.XML.Expat.Tree
-import Data.Conduit
-import qualified Data.Conduit.List as C
-import Data.Array.Repa ((:.)(..), Z (..), fromListUnboxed)
-import qualified Data.Array.Repa as Repa
+import           Control.Exception        (throw)
+import           Control.Lens             (makeLenses)
+import           Data.Array.Repa          ((:.) (..), Z (..), fromListUnboxed)
+import qualified Data.Array.Repa          as Repa
+import           Data.Conduit
 import qualified Data.Conduit.Combinators as C (yieldMany)
-import qualified Data.Random as RND (shuffleN, runRVar, StdRandom(..))
-import qualified Graphics.Image as HIP
+import qualified Data.Conduit.List        as C
+import qualified Data.Random              as RND (StdRandom (..), runRVar,
+                                                  shuffleN)
+import qualified Data.Vector.Storable     as SV (unsafeCast)
+import           GHC.Float                (double2Float)
+import qualified Graphics.Image           as HIP
 import qualified Graphics.Image.Interface as HIP
-import Control.Lens (makeLenses)
-import Control.Exception (throw)
-import GHC.Float (double2Float)
+import           RIO
+import qualified RIO.ByteString           as B
+import           RIO.FilePath
+import qualified RIO.Text                 as T
+import qualified RIO.Vector.Boxed         as V
+import qualified RIO.Vector.Storable      as SV
+import           Text.XML.Expat.Proc
+import           Text.XML.Expat.Tree
 
-import MXNet.NN.DataIter.Common
+import           MXNet.Base.ParserUtils   (parseR, rational)
+import           MXNet.NN.DataIter.Common
 
-data Exc = FileNotFound String String | CannotParseAnnotation String
-  deriving Show
+data Exc = FileNotFound String String
+    | CannotParseAnnotation String
+    deriving Show
 instance Exception Exc
 
-classes :: V.Vector String
+classes :: V.Vector Text
 classes = V.fromList [
     "__background__",  -- always index 0
     "aeroplane", "bicycle", "bird", "boat",
@@ -104,7 +107,7 @@ loadImageAndBBoxes ident = do
     gtBoxes <- case parse' defaultParseOptions xml of
         Left err -> throw (CannotParseAnnotation annoFilePath) err
         Right root -> do
-            let objs = findElements "object" root
+            let objs = findElements "object" (root :: Node Text Text)
             return $ V.fromList $ catMaybes $ map (makeGTBox scale) objs
 
     if V.null gtBoxes
@@ -122,9 +125,9 @@ loadImageAndBBoxes ident = do
         ymin <- textContent <$> findElement "ymin" bndbox
         ymax <- textContent <$> findElement "ymax" bndbox
         classId <- V.elemIndex className classes
-        let x0 = read xmin
-            x1 = read xmax
-            y0 = read ymin
-            y1 = read ymax
+        let x0 = parseR rational xmin
+            x1 = parseR rational xmax
+            y0 = parseR rational ymin
+            y1 = parseR rational ymax
         return $ fromListUnboxed (Z :. 5) [x0*scale, y0*scale, x1*scale, y1*scale, fromIntegral classId]
 
