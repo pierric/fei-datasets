@@ -12,6 +12,7 @@ import           Data.Random                  (StdRandom (..), runRVar,
 import qualified Data.Vector.Unboxed.Mutable  as UVM
 import           RIO
 import qualified RIO.HashMap                  as M
+import qualified RIO.NonEmpty                 as NE
 import qualified RIO.Set                      as Set
 import qualified RIO.Vector.Boxed             as V
 import qualified RIO.Vector.Boxed.Unsafe      as V
@@ -20,10 +21,10 @@ import qualified RIO.Vector.Unboxed.Partial   as UV (maxIndex)
 import qualified RIO.Vector.Unboxed.Unsafe    as UV (unsafeFreeze)
 
 import           MXNet.Base
-import           MXNet.Base.Operators.NDArray (slice_like, _set_value_upd)
+import           MXNet.Base.Operators.NDArray (slice, _set_value_upd)
 import           MXNet.Base.ParserUtils       (decimal, list, parseR, rational,
                                                tuple)
-import           MXNet.NN.NDArray             (copy)
+import           MXNet.NN.NDArray             (copy, reshape)
 import           MXNet.NN.Utils.Repa          (vstack, (^#!))
 import qualified MXNet.NN.Utils.Repa          as Repa
 
@@ -35,13 +36,14 @@ type Anchor r = Array r DIM1 Float
 type GTBox r = Array r DIM1 Float
 
 data Configuration = Configuration
-    { _conf_anchor_scales  :: [Int]
-    , _conf_anchor_ratios  :: [Float]
-    , _conf_allowed_border :: Int
-    , _conf_fg_num         :: Int
-    , _conf_batch_num      :: Int
-    , _conf_bg_overlap     :: Float
-    , _conf_fg_overlap     :: Float
+    { _conf_anchor_scales    :: [Int]
+    , _conf_anchor_ratios    :: [Float]
+    , _conf_anchor_base_size :: Int
+    , _conf_allowed_border   :: Int
+    , _conf_fg_num           :: Int
+    , _conf_batch_num        :: Int
+    , _conf_bg_overlap       :: Float
+    , _conf_fg_overlap       :: Float
     }
     deriving Show
 makeLenses ''Configuration
@@ -105,7 +107,7 @@ overlapMatrix goodIndices gtBoxes anBoxes = Repa.fromFunction (Z :. width :. hei
             areaU = areaA %! ia + areaG %! ig - areaI
         in if Set.member ia goodIndices && iw > 0 && ih > 0 then areaI / areaU else 0
 
-type Labels  = Repa.Array U DIM1 Float -- UV.Vector Int
+type Labels  = Repa.Array U DIM2 Float -- UV.Vector Int
 type Targets = Repa.Array U DIM2 Float -- UV.Vector (Float, Float, Float, Float)
 type Weights = Repa.Array U DIM2 Float -- UV.Vector (Float, Float, Float, Float)
 
@@ -121,7 +123,7 @@ assign gtBoxes imWidth imHeight anBoxes
             let targets = UV.replicate (numLabels * 4) 0
                 weights = UV.replicate (numLabels * 4) 0
             labels <- UV.unsafeFreeze labels
-            let labelsRepa  = Repa.fromUnboxed (Z:.numLabels) labels
+            let labelsRepa  = Repa.fromUnboxed (Z:.numLabels:.1) labels
                 targetsRepa = Repa.fromUnboxed (Z:.numLabels:.4) targets
                 weightsRepa = Repa.fromUnboxed (Z:.numLabels:.4) weights
             return (labelsRepa, targetsRepa, weightsRepa)
@@ -192,7 +194,7 @@ assign gtBoxes imWidth imHeight anBoxes
             labels  <- UV.unsafeFreeze labels
             targets <- UV.unsafeFreeze targets
             weights <- UV.unsafeFreeze weights
-            let labelsRepa  = Repa.fromUnboxed (Z:.numLabels) labels
+            let labelsRepa  = Repa.fromUnboxed (Z:.numLabels:.1) labels
                 targetsRepa = Repa.fromUnboxed (Z:.numLabels:.4) (flattenT targets)
                 weightsRepa = Repa.fromUnboxed (Z:.numLabels:.4) (flattenT weights)
             return (labelsRepa, targetsRepa, weightsRepa)
@@ -271,22 +273,28 @@ instance CustomOperation (Operation AnchorGeneratorProp) where
         -- :param: anchors, shape of (1, N, 4), where N is number of anchors
 
         let alloc = prop ^. ag_anchors_alloc
-        ret <- sing slice_like (#data := unNDArray alloc .& #shape_like := feature .& #axes := [2,3] .& Nil)
-        void $ copy (NDArray ret :: NDArray Float) (NDArray anchors)
+
+        -- get the height, width of the feature (B,C,H,W)
+        [_,_,h,w] <- NE.toList <$> ndshape (NDArray feature :: NDArray Float)
+        let beg = [0,0,0,0]
+            end = [1,1,h,w]
+        ret <- sing slice (#data := unNDArray alloc .& #begin:= beg .& #end:= end .& Nil)
+        ret <- reshape (NDArray ret :: NDArray Float) [1,-1,4]
+        void $ copy ret (NDArray anchors)
 
     backward _ [ReqWrite] _ _ [in_grad_0] _ _ = do
         _set_value_upd [in_grad_0] (#src := 0 .& Nil)
 
-buildAnchorGenerator :: [(Text, Text)] -> IO AnchorGeneratorProp
+buildAnchorGenerator :: HasCallStack => [(Text, Text)] -> IO AnchorGeneratorProp
 buildAnchorGenerator params = do
     let allocV = anchors alloc_size stride base_size scales ratios
         -- convert from `Vector (Array [4])` -> Array [1, 1, N, 4]
         allocR = expandD0 $ expandD0 $ vstack $ V.map expandD0 allocV
         num_scales = length scales
         num_ratios = length ratios
-        num_anchs  = num_scales * num_ratios * base_size * base_size
+        (height, width) = alloc_size
 
-    allocA <- makeEmptyNDArray [1, 1, num_anchs, 4] contextCPU
+    allocA <- makeEmptyNDArray [1, 1, height, width, 4*num_scales*num_ratios] contextCPU
     copyFromRepa allocA allocR
 
     return $ AnchorGeneratorProp
