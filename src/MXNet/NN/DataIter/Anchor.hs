@@ -1,32 +1,31 @@
 {-# LANGUAGE TemplateHaskell #-}
 module MXNet.NN.DataIter.Anchor where
 
-import           Control.Exception            (throw)
-import           Control.Lens                 (ix, makeLenses, (^?!))
-import           Data.Array.Repa              ((:.) (..), All (..), Array, D,
-                                               DIM1, DIM2, U, Z (..),
-                                               fromListUnboxed, (+^))
-import qualified Data.Array.Repa              as Repa
-import           Data.Random                  (StdRandom (..), runRVar,
-                                               shuffleN)
-import qualified Data.Vector.Unboxed.Mutable  as UVM
+import           Control.Exception           (throw)
+import           Control.Lens                (ix, makeLenses, (^?!))
+import           Data.Array.Repa             ((:.) (..), All (..), Array, D,
+                                              DIM1, DIM2, U, Z (..),
+                                              fromListUnboxed, (+^))
+import qualified Data.Array.Repa             as Repa
+import           Data.Random                 (StdRandom (..), runRVar, shuffleN)
+import qualified Data.Vector.Unboxed.Mutable as UVM
 import           RIO
-import qualified RIO.HashMap                  as M
-import qualified RIO.NonEmpty                 as NE
-import qualified RIO.Set                      as Set
-import qualified RIO.Vector.Boxed             as V
-import qualified RIO.Vector.Boxed.Unsafe      as V
-import qualified RIO.Vector.Unboxed           as UV
-import qualified RIO.Vector.Unboxed.Partial   as UV (maxIndex)
-import qualified RIO.Vector.Unboxed.Unsafe    as UV (unsafeFreeze)
+import qualified RIO.HashMap                 as M
+import qualified RIO.NonEmpty                as NE
+import qualified RIO.Set                     as Set
+import qualified RIO.Vector.Boxed            as V
+import qualified RIO.Vector.Boxed.Unsafe     as V
+import qualified RIO.Vector.Unboxed          as UV
+import qualified RIO.Vector.Unboxed.Partial  as UV (maxIndex)
+import qualified RIO.Vector.Unboxed.Unsafe   as UV (unsafeFreeze)
 
 import           MXNet.Base
-import           MXNet.Base.Operators.NDArray (slice, _set_value_upd)
-import           MXNet.Base.ParserUtils       (decimal, list, parseR, rational,
-                                               tuple)
-import           MXNet.NN.NDArray             (copy, reshape)
-import           MXNet.NN.Utils.Repa          (vstack, (^#!))
-import qualified MXNet.NN.Utils.Repa          as Repa
+import           MXNet.Base.Operators.Tensor (__set_value, _slice)
+import           MXNet.Base.ParserUtils      (decimal, list, parseR, rational,
+                                              tuple)
+import           MXNet.NN.Layer              (copy, reshape)
+import           MXNet.NN.Utils.Repa         (vstack, (^#!))
+import qualified MXNet.NN.Utils.Repa         as Repa
 
 data AnchorError = BadDimension
     deriving Show
@@ -85,7 +84,7 @@ mkanchor x y w h = fromListUnboxed (Z :. 4) [x - hW, y - hH, x + hW, y + hH]
     hW = 0.5 * (w - 1)
     hH = 0.5 * (h - 1)
 
-(%!) :: V.Vector a -> Int -> a
+(%!) :: HasCallStack => V.Vector a -> Int -> a
 (%!) = (V.unsafeIndex)
 
 overlapMatrix :: Set Int -> V.Vector (GTBox U) -> V.Vector (Anchor U) -> Array D DIM2 Float
@@ -278,12 +277,15 @@ instance CustomOperation (Operation AnchorGeneratorProp) where
         [_,_,h,w] <- NE.toList <$> ndshape (NDArray feature :: NDArray Float)
         let beg = [0,0,0,0]
             end = [1,1,h,w]
-        ret <- sing slice (#data := unNDArray alloc .& #begin:= beg .& #end:= end .& Nil)
-        ret <- reshape (NDArray ret :: NDArray Float) [1,-1,4]
+        ret <- prim _slice (#data := alloc .& #begin:= beg .& #end:= end .& Nil)
+        ret <- reshape [1,-1,4] ret
         void $ copy ret (NDArray anchors)
 
     backward _ [ReqWrite] _ _ [in_grad_0] _ _ = do
-        _set_value_upd [in_grad_0] (#src := 0 .& Nil)
+        -- type annotation is necessary, because only a general form
+        -- can be inferred.
+        let set_zeros = __set_value (#src := 0 .& Nil) :: TensorApply NDArrayHandle
+        void $ set_zeros (Just ([in_grad_0]))
 
 buildAnchorGenerator :: HasCallStack => [(Text, Text)] -> IO AnchorGeneratorProp
 buildAnchorGenerator params = do

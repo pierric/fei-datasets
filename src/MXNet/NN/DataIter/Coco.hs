@@ -41,7 +41,6 @@ import           MXNet.NN.DataIter.Common
 
 classes :: V.Vector String
 classes = V.fromList [
-    "__background__",  -- always index 0
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
     "truck", "boat", "traffic light", "fire hydrant", "stop sign",
     "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep",

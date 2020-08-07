@@ -1,11 +1,11 @@
 resolver: lts-14.27
 packages:
 - .
-extra-deps:
 - ../fei-cocoapi
 - ../fei-nn
 - ../fei-base
 - ../tuple-ops
+extra-deps:
 - git: https://github.com/0xCM/type-combinators.git
   commit: 58167dd4017b666ff592bb9493b0570a054aabdb
 - git: https://github.com/pierric/haskell-src-exts.git
