@@ -160,8 +160,8 @@ cocoImagesBBoxesMasks shuffle = cocoImageList shuffle .| C.mapM build .| C.catMa
 
 getImageScale :: Image -> Int -> (Float, Int, Int)
 getImageScale img size
-  | oriW >= oriH = (sizeF / oriW, size, floor (oriH * sizeF / oriW))
-  | otherwise    = (sizeF / oriH, floor (oriW * sizeF / oriH), size)
+  | oriW >= oriH = (sizeF / oriW, floor (oriH * sizeF / oriW), size)
+  | otherwise    = (sizeF / oriH, size, floor (oriW * sizeF / oriH))
     where
         oriW = fromIntegral $ img ^. img_width
         oriH = fromIntegral $ img ^. img_height
