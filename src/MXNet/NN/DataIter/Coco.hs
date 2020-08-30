@@ -41,7 +41,6 @@ import           MXNet.NN.DataIter.Common
 
 classes :: V.Vector String
 classes = V.fromList [
-    "__background__",  -- always index 0
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
     "truck", "boat", "traffic light", "fire hydrant", "stop sign",
     "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep",
@@ -161,8 +160,8 @@ cocoImagesBBoxesMasks shuffle = cocoImageList shuffle .| C.mapM build .| C.catMa
 
 getImageScale :: Image -> Int -> (Float, Int, Int)
 getImageScale img size
-  | oriW >= oriH = (sizeF / oriW, size, floor (oriH * sizeF / oriW))
-  | otherwise    = (sizeF / oriH, floor (oriW * sizeF / oriH), size)
+  | oriW >= oriH = (sizeF / oriW, floor (oriH * sizeF / oriW), size)
+  | otherwise    = (sizeF / oriH, size, floor (oriW * sizeF / oriH))
     where
         oriW = fromIntegral $ img ^. img_width
         oriH = fromIntegral $ img ^. img_height
