@@ -7,6 +7,7 @@ module MXNet.NN.DataIter.Coco(
     classes, coco,
     cocoImageList, cocoImages, cocoImagesBBoxes, cocoImagesBBoxesMasks,
     loadImage, loadBoundingBoxes, loadMasks,
+    augmentWithBBoxes,
 ) where
 
 import           Control.Lens                  (ix, makeLenses, (^?!))
@@ -17,8 +18,9 @@ import qualified Data.Array.Repa               as Repa
 import           Data.Conduit
 import qualified Data.Conduit.Combinators      as C (yieldMany)
 import qualified Data.Conduit.List             as C
-import qualified Data.Random                   as RND (StdRandom (..), runRVar,
-                                                       shuffleN)
+import qualified Data.Random                   as RND (runRVar, shuffleN,
+                                                       stdUniform)
+import           Data.Random.Source.StdGen     (StdGen)
 import qualified Data.Store                    as Store
 import qualified Data.Vector.Storable          as SV (unsafeCast)
 import           GHC.Float                     (double2Float)
@@ -109,21 +111,18 @@ coco base datasplit = cached (datasplit ++ ".store") $ do
 
 
 cocoImageList :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
-              => Bool -> ConduitT () Image m ()
-cocoImageList shuffle = do
+              => IORef StdGen -> ConduitT () Image m ()
+cocoImageList rand_gen = do
     Coco _ _ inst _ <- view (datasetConfig . conf_coco)
     let all_images = inst ^. images
     all_images_shuffle <- liftIO $
-        if shuffle then
-            RND.runRVar (RND.shuffleN (length all_images) (V.toList all_images)) RND.StdRandom
-        else
-            return $ V.toList all_images
+        RND.runRVar (RND.shuffleN (length all_images) (V.toList all_images)) rand_gen
     C.yieldMany all_images_shuffle -- .| C.iterM (liftIO . print)
 
 
 cocoImages :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
-           => Bool -> ConduitT () (String, ImageTensor, ImageInfo) m ()
-cocoImages shuffle = cocoImageList shuffle .| C.mapM build
+           => IORef StdGen -> ConduitT () (String, ImageTensor, ImageInfo) m ()
+cocoImages rand_gen = cocoImageList rand_gen .| C.mapM build
     where
         build image = do
             let filename = image ^. img_file_name
@@ -132,8 +131,8 @@ cocoImages shuffle = cocoImageList shuffle .| C.mapM build
 
 
 cocoImagesBBoxes :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
-                 => Bool -> ConduitT () (String, ImageTensor, ImageInfo, GTBoxes) m ()
-cocoImagesBBoxes shuffle = cocoImageList shuffle .| C.mapM build .| C.catMaybes
+                 => IORef StdGen -> ConduitT () (String, ImageTensor, ImageInfo, GTBoxes) m ()
+cocoImagesBBoxes rand_gen = cocoImageList rand_gen .| C.mapM build .| C.catMaybes
     where
         build image = do
             let filename = image ^. img_file_name
@@ -145,8 +144,8 @@ cocoImagesBBoxes shuffle = cocoImageList shuffle .| C.mapM build .| C.catMaybes
 
 
 cocoImagesBBoxesMasks :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
-                      => Bool -> ConduitT () (String, ImageTensor, ImageInfo, GTBoxes, Masks) m ()
-cocoImagesBBoxesMasks shuffle = cocoImageList shuffle .| C.mapM build .| C.catMaybes
+                      => IORef StdGen -> ConduitT () (String, ImageTensor, ImageInfo, GTBoxes, Masks) m ()
+cocoImagesBBoxesMasks rand_gen = cocoImageList rand_gen .| C.mapM build .| C.catMaybes
     where
         build image = do
             let filename = image ^. img_file_name
@@ -156,6 +155,26 @@ cocoImagesBBoxesMasks shuffle = cocoImageList shuffle .| C.mapM build .| C.catMa
             case liftA2 (,) mboxes mmasks of
               Nothing             -> return Nothing
               Just (boxes, masks) -> return $!! Just (filename, img, info, boxes, masks)
+
+
+augmentWithBBoxes :: MonadIO m
+                  => IORef StdGen
+                  -> (String, ImageTensor, ImageInfo, GTBoxes)
+                  -> m (String, ImageTensor, ImageInfo, GTBoxes)
+augmentWithBBoxes rand_gen inp@(ident, img, info, bboxes) = liftIO $ do
+    do_flip <- RND.runRVar RND.stdUniform rand_gen
+    return $
+        if not do_flip
+          then inp
+          else let shp@(Z :. c :. h :. w) = Repa.extent img
+                   flip_img (Z :. c :. y :. x) = Z :. c :. y :. (w - x - 1)
+                   img_flipped = Repa.computeUnboxedS $ Repa.backpermute shp flip_img img
+                   w' = fromIntegral w
+                   flip_box box = Repa.fromUnboxed (Z :. 5) $ case Repa.toUnboxed box of
+                                    -- flip, and rebuild the top-left, bottom-right coords
+                                    [x0, y0, x1, y1, sc] -> [w'-x1-1, y0, w'-x0-1, y1, sc]
+                   boxes_flipped = V.map flip_box bboxes
+               in (ident, img_flipped, info, boxes_flipped)
 
 
 getImageScale :: Image -> Int -> (Float, Int, Int)

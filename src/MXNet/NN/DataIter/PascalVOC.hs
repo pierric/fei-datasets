@@ -6,29 +6,30 @@ module MXNet.NN.DataIter.PascalVOC (
     classes, vocMainImages, loadImageAndBBoxes
 ) where
 
-import           Control.Exception        (throw)
-import           Control.Lens             (makeLenses)
-import           Data.Array.Repa          ((:.) (..), Z (..), fromListUnboxed)
-import qualified Data.Array.Repa          as Repa
+import           Control.Exception         (throw)
+import           Control.Lens              (makeLenses)
+import           Data.Array.Repa           ((:.) (..), Z (..), fromListUnboxed)
+import qualified Data.Array.Repa           as Repa
 import           Data.Conduit
-import qualified Data.Conduit.Combinators as C (yieldMany)
-import qualified Data.Conduit.List        as C
-import qualified Data.Random              as RND (StdRandom (..), runRVar,
-                                                  shuffleN)
-import qualified Data.Vector.Storable     as SV (unsafeCast)
-import           GHC.Float                (double2Float)
-import qualified Graphics.Image           as HIP
-import qualified Graphics.Image.Interface as HIP
+import qualified Data.Conduit.Combinators  as C (yieldMany)
+import qualified Data.Conduit.List         as C
+import qualified Data.Random               as RND (runRVar, shuffleN,
+                                                   stdUniform)
+import           Data.Random.Source.StdGen (StdGen)
+import qualified Data.Vector.Storable      as SV (unsafeCast)
+import           GHC.Float                 (double2Float)
+import qualified Graphics.Image            as HIP
+import qualified Graphics.Image.Interface  as HIP
 import           RIO
-import qualified RIO.ByteString           as B
+import qualified RIO.ByteString            as B
 import           RIO.FilePath
-import qualified RIO.Text                 as T
-import qualified RIO.Vector.Boxed         as V
-import qualified RIO.Vector.Storable      as SV
+import qualified RIO.Text                  as T
+import qualified RIO.Vector.Boxed          as V
+import qualified RIO.Vector.Storable       as SV
 import           Text.XML.Expat.Proc
 import           Text.XML.Expat.Tree
 
-import           MXNet.Base.ParserUtils   (parseR, rational)
+import           MXNet.Base.ParserUtils    (parseR, rational)
 import           MXNet.NN.DataIter.Common
 
 data Exc = FileNotFound String String
@@ -64,16 +65,13 @@ instance ImageDataset "voc" where
     imagesStdDev = conf_std
 
 vocMainImages :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "voc", MonadIO m) =>
-    String -> Bool -> ConduitT () String m ()
-vocMainImages datasplit shuffle = do
+    String -> IORef StdGen -> ConduitT () String m ()
+vocMainImages datasplit rand_gen = do
     base <- view (datasetConfig . conf_base_dir)
     let imageset = base </> "ImageSets" </> "Main" </> datasplit <.> "txt"
     content <- readFileUtf8 imageset
     let image_list = T.lines content
-    all_images <- if shuffle then
-                    liftIO $ RND.runRVar (RND.shuffleN (length image_list) image_list) RND.StdRandom
-                  else
-                    return $ image_list
+    all_images <- liftIO $ RND.runRVar (RND.shuffleN (length image_list) image_list) rand_gen
     C.yieldMany all_images .| C.map T.unpack
 
 loadImageAndBBoxes :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "voc", MonadIO m) =>

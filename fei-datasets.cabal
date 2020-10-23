@@ -44,6 +44,7 @@ Library
                           , hexpat
                           , store
                           , random-fu
+                          , random-source
                           , conduit-concurrent-map
                           , resourcet
                           , hip
@@ -69,6 +70,7 @@ Executable render
                           hip,
                           vector,
                           rio,
+                          random-source,
                           JuicyPixels,
                           FontyFruity,
                           Rasterific
@@ -90,6 +92,7 @@ Executable bench
                           repa,
                           hip,
                           rio,
+                          random-source,
                           stm-conduit,
                           JuicyPixels,
                           JuicyPixels-repa,

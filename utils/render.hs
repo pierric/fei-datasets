@@ -6,16 +6,6 @@
 {-# LANGUAGE RecordWildCards   #-}
 module Main where
 
-import qualified Data.Vector.Storable         as SV (unsafeCast)
-import           GHC.TypeLits                 (Symbol)
-import           RIO
-import           RIO.FilePath
-import qualified RIO.Text                     as T
-import qualified RIO.Vector.Boxed             as V
-import qualified RIO.Vector.Boxed.Partial     as V ((!))
-import qualified RIO.Vector.Storable          as SV
-import qualified RIO.Vector.Unboxed           as UV
-
 import           Codec.Picture.Types
 import           Control.Monad.Trans.Resource
 import           Data.Array.Repa              ((:.) (..), Z (..))
@@ -25,19 +15,30 @@ import           Data.Attoparsec.Text         (char, decimal, endOfInput,
 import           Data.Conduit
 import qualified Data.Conduit.Combinators     as C (map, mapM, mapM_, take)
 import qualified Data.Conduit.List            as C (catMaybes)
+import           Data.Random.Source.StdGen    (mkStdGen)
+import qualified Data.Vector.Storable         as SV (unsafeCast)
+import           GHC.TypeLits                 (Symbol)
 import qualified Graphics.Image               as HIP
 import qualified Graphics.Image.Interface     as HIP
 import           Graphics.Rasterific
 import           Graphics.Rasterific.Texture  (uniformTexture)
 import           Graphics.Text.TrueType
-import qualified MXNet.NN.DataIter.Coco       as DC
-import           MXNet.NN.DataIter.Common
-import qualified MXNet.NN.DataIter.PascalVOC  as DV
 import           Options.Applicative          (Parser, auto, eitherReader,
                                                execParser, fullDesc, header,
                                                help, helper, info, long,
                                                metavar, option, showDefault,
                                                strOption, switch, value, (<**>))
+import           RIO
+import           RIO.FilePath
+import qualified RIO.Text                     as T
+import qualified RIO.Vector.Boxed             as V
+import qualified RIO.Vector.Boxed.Partial     as V ((!))
+import qualified RIO.Vector.Storable          as SV
+import qualified RIO.Vector.Unboxed           as UV
+
+import qualified MXNet.NN.DataIter.Coco       as DC
+import           MXNet.NN.DataIter.Common
+import qualified MXNet.NN.DataIter.PascalVOC  as DV
 
 data Args = Args
     { arg_dataset   :: String
@@ -47,7 +48,7 @@ data Args = Args
     , arg_mean      :: (Float, Float, Float)
     , arg_stddev    :: (Float, Float, Float)
     , arg_num_imgs  :: Int
-    , arg_shuffle   :: Bool
+    , arg_shuffle   :: Maybe Int
     }
 
 cmdArgParser = Args <$> strOption        (long "dataset" <> metavar "DATASET" <> help "dataset name")
@@ -57,7 +58,7 @@ cmdArgParser = Args <$> strOption        (long "dataset" <> metavar "DATASET" <>
                     <*> option floatList (long "img-pixel-means" <> metavar "RGB-MEAN" <> showDefault <> value (0.4850, 0.4580, 0.4076) <> help "RGB mean of images")
                     <*> option floatList (long "img-pixel-stddev" <> metavar "RGB-STD" <> showDefault <> value (1,1,1) <> help "RGB std-dev of images")
                     <*> option auto      (long "num-imgs" <> metavar "NUM-IMG" <> showDefault <> value 10 <> help "number of images")
-                    <*> switch           (long "shuffle" <> showDefault <> help "shuffle")
+                    <*> option auto      (long "shuffle" <> showDefault <> help "shuffle")
   where
     triple = do
         a <- rational
@@ -121,14 +122,17 @@ main = do
         dump = C.take arg_num_imgs .|
                C.mapM (renderWithBBox font) .|
                C.mapM_ save
+
+    rand_gen <- newIORef $ mkStdGen $ fromMaybe 0 arg_shuffle
+
     case arg_dataset of
         "coco" -> do
             coco <- DC.coco arg_base_dir arg_datasplit
             let conf = DC.CocoConfig coco arg_width arg_mean arg_stddev
-                iter = DC.cocoImagesBBoxes arg_shuffle
+                iter = DC.cocoImagesBBoxes rand_gen .| C.mapM (DC.augmentWithBBoxes rand_gen)
             void $ runResourceT $ flip runReaderT conf $ runConduit $ iter .| C.map (lookupClassName DC.classes) .| dump
         "voc" -> do
             let conf = DV.VOCConfig arg_base_dir arg_width arg_mean arg_stddev
-                iter = DV.vocMainImages arg_datasplit arg_shuffle .| C.mapM DV.loadImageAndBBoxes .| C.catMaybes
+                iter = DV.vocMainImages arg_datasplit rand_gen .| C.mapM DV.loadImageAndBBoxes .| C.catMaybes
             void $ flip runReaderT conf $ runConduit $ iter .| C.map (lookupClassName $ V.map T.unpack DV.classes) .| dump
 
