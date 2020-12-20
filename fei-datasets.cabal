@@ -1,16 +1,16 @@
+cabal-version:              2.4
 name:                       fei-datasets
-version:                    0.2.0
-synopsis:                   Pascal VOC dataset
+version:                    1.0.0
+synopsis:                   Some datasets
 description:
 homepage:                   http://github.com/pierric/fei-datasets
-license:                    BSD3
+license:                    BSD-3-Clause
 license-file:               LICENSE
 author:                     Jiasen Wu
 maintainer:                 jiasenwu@hotmail.com
-copyright:                  Copyright: (c) 2020 Jiasen Wu
+copyright:                  2020 - Jiasen Wu
 category:                   Machine Learning, AI
 build-type:                 Simple
-cabal-version:              1.24
 
 Library
     exposed-modules:        MXNet.NN.DataIter.PascalVOC
