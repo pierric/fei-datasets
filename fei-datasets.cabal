@@ -1,6 +1,6 @@
 cabal-version:              2.4
 name:                       fei-datasets
-version:                    1.0.0
+version:                    2.0.0
 synopsis:                   Some datasets
 description:
 homepage:                   http://github.com/pierric/fei-datasets
