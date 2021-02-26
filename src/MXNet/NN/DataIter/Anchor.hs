@@ -1,68 +1,67 @@
 {-# LANGUAGE TemplateHaskell #-}
 module MXNet.NN.DataIter.Anchor where
 
-import           Control.Exception           (throw)
-import           Control.Lens                (ix, makeLenses, (^?!))
-import           Data.Array.Repa             ((:.) (..), All (..), Array, D,
-                                              DIM1, DIM2, U, Z (..),
-                                              fromListUnboxed, (+^))
-import qualified Data.Array.Repa             as Repa
-import           Data.Random                 (StdRandom (..), runRVar, shuffleN)
-import qualified Data.Vector.Unboxed.Mutable as UVM
+import           Control.Lens                 (ix, makeLenses, (^?!))
+import           Data.Random                  (StdRandom (..), runRVar,
+                                               shuffleNofM)
+import qualified Data.Vector                  as V (fold1M)
+import qualified Data.Vector.Storable.Mutable as SVM
 import           RIO
-import qualified RIO.HashMap                 as M
-import qualified RIO.NonEmpty                as NE
-import qualified RIO.Set                     as Set
-import qualified RIO.Vector.Boxed            as V
-import qualified RIO.Vector.Boxed.Unsafe     as V
-import qualified RIO.Vector.Unboxed          as UV
-import qualified RIO.Vector.Unboxed.Partial  as UV (maxIndex)
-import qualified RIO.Vector.Unboxed.Unsafe   as UV (unsafeFreeze)
+import qualified RIO.HashMap                  as M
+import qualified RIO.NonEmpty                 as NE
+import qualified RIO.Vector.Storable          as SV
 
+import           Fei.Einops
 import           MXNet.Base
-import           MXNet.Base.Operators.Tensor (__set_value, _slice)
-import           MXNet.Base.ParserUtils      (decimal, list, parseR, rational,
-                                              tuple)
-import           MXNet.NN.Layer              (copy, reshape)
-import           MXNet.NN.Utils.Repa         (vstack, (^#!))
-import qualified MXNet.NN.Utils.Repa         as Repa
+import           MXNet.Base.Operators.Tensor  (__contrib_box_encode,
+                                               __contrib_box_iou, __set_value,
+                                               _slice)
+import           MXNet.Base.ParserUtils       (decimal, list, parseR, rational,
+                                               tuple)
+import           MXNet.NN.DataIter.Common     (Anchors, GTBoxes, getImageScale)
+import           MXNet.NN.Layer               (addScalar, add_, and_, argmax,
+                                               broadcastLike, copy, eqBroadcast,
+                                               expandDims, geqScalar, gtScalar,
+                                               leqScalar, ltScalar, max_,
+                                               mulBroadcast, mul_, or_, reshape,
+                                               rsubScalar, sliceAxis,
+                                               splitBySections, squeeze, stack,
+                                               subScalar, sum_)
 
-data AnchorError = BadDimension
-    deriving Show
+data AnchorError = BadDimension deriving (Show)
 instance Exception AnchorError
 
-type Anchor r = Array r DIM1 Float
-type GTBox r = Array r DIM1 Float
-
-data Configuration = Configuration
-    { _conf_anchor_scales    :: [Int]
-    , _conf_anchor_ratios    :: [Float]
-    , _conf_anchor_base_size :: Int
-    , _conf_allowed_border   :: Int
-    , _conf_fg_num           :: Int
-    , _conf_batch_num        :: Int
-    , _conf_bg_overlap       :: Float
-    , _conf_fg_overlap       :: Float
-    }
-    deriving Show
+data Configuration
+  = Configuration
+      { _conf_anchor_scales    :: [Int]
+      , _conf_anchor_ratios    :: [Float]
+      , _conf_anchor_base_size :: Int
+      , _conf_allowed_border   :: Int
+      , _conf_fg_num           :: Int
+      , _conf_batch_num        :: Int
+      , _conf_bg_overlap       :: Float
+      , _conf_fg_overlap       :: Float
+      }
+  deriving (Show)
 makeLenses ''Configuration
 
-anchors :: (Int, Int) -> Int -> Int -> [Int] -> [Float] -> V.Vector (Anchor U)
-anchors (height, width) stride base_size scales ratios =
-    V.fromList
-        [ Repa.computeS $ anch +^ offs
-        | offY <- grid height
-        , offX <- grid width
-        , anch <- base
-        , let offs = fromListUnboxed (Z :. 4) [offX, offY, offX, offY]]
+anchors :: (Int, Int) -> Int -> Int -> [Int] -> [Float] -> IO Anchors
+anchors (height, width) stride base_size scales ratios = do
+    base <- baseAnchors base_size scales ratios
+    variations <- sequence [ make anch offX offY
+                           | offY <- grid height
+                           , offX <- grid width
+                           , anch <- base ]
+    stack 0 variations
   where
-    base = baseAnchors base_size scales ratios
     grid size = map fromIntegral [0, stride .. size * stride-1]
+    make anch offX offY = do
+        offs <- fromVector [4] [offX, offY, offX, offY]
+        add_ anch offs
 
-baseAnchors :: Int -> [Int] -> [Float] -> [Anchor U]
-baseAnchors base_size scales ratios = [makeBase s r | r <- ratios, s <- scales]
+baseAnchors :: Int -> [Int] -> [Float] -> IO [NDArray Float]
+baseAnchors base_size scales ratios = sequence [makeBase s r | r <- ratios, s <- scales]
   where
-    makeBase :: Int -> Float -> Anchor U
     makeBase scale ratio =
         let sizeF = fromIntegral base_size - 1
             (w, h, x, y) = whctr (0, 0, sizeF, sizeF)
@@ -78,176 +77,130 @@ whctr (x0, y0, x1, y1) = (w, h, x, y)
     x = x0 + 0.5 * (w - 1)
     y = y0 + 0.5 * (h - 1)
 
-mkanchor :: Float -> Float -> Float -> Float -> Anchor U
-mkanchor x y w h = fromListUnboxed (Z :. 4) [x - hW, y - hH, x + hW, y + hH]
+mkanchor :: Float -> Float -> Float -> Float -> IO (NDArray Float)
+mkanchor x y w h = fromVector [4] [x - hW, y - hH, x + hW, y + hH]
   where
     hW = 0.5 * (w - 1)
     hH = 0.5 * (h - 1)
 
-(%!) :: HasCallStack => V.Vector a -> Int -> a
-(%!) = (V.unsafeIndex)
+overlapMatrix :: HasCallStack => NDArray Float -> GTBoxes -> Anchors -> IO (NDArray Float)
+overlapMatrix mask gtBoxes anBoxes = do
+    -- iou is of the shape [numGTs, numAnchors]
+    iou <- prim __contrib_box_iou (#lhs := gtBoxes .& #rhs := anBoxes .& #format := #corner .& Nil)
+    -- rearrange mask from [numAnchors] -> [1, numAnchors]
+    mask <- rearrange mask "(n a) -> n a" [#n .== 1]
+    mulBroadcast iou mask
 
-overlapMatrix :: Set Int -> V.Vector (GTBox U) -> V.Vector (Anchor U) -> Array D DIM2 Float
-overlapMatrix goodIndices gtBoxes anBoxes = Repa.fromFunction (Z :. width :. height) calcOvp
+type Labels  = NDArray Float -- DIM2
+type Targets = NDArray Float -- DIM2
+type Weights = NDArray Float -- DIM2
+
+assign :: (HasCallStack, MonadReader Configuration m, MonadIO m) =>
+    GTBoxes -> Int -> Int -> Anchors -> m (Labels, Targets, Weights)
+assign gtBoxes imWidth imHeight anBoxes = do
+    -- #GT should never be 0
+    --    goodIndices <- filterGoodIndices anBoxes
+    --    liftIO $ do
+    --        indices <- runRVar (shuffleN (Set.size goodIndices) (Set.toList goodIndices)) StdRandom
+    --        labels  <- SVM.replicate numAnchors (-1)
+    --        forM_ indices $
+    --            flip (SVM.write labels) 0
+    --        labels  <- fromVector [numAnchors, 1] $ SV.unsafeFreeze labels
+    --        targets <- zeros [numAnchors, 4]
+    --        weights <- zeros [numAnchors, 4]
+    --        return (labels, targets, weights)
+
+    _fg_overlap <- view conf_fg_overlap
+    _bg_overlap <- view conf_bg_overlap
+    _batch_num  <- view conf_batch_num
+    _fg_num     <- view conf_fg_num
+    _allowed_border <- fromIntegral <$> view conf_allowed_border
+
+    liftIO $ do
+        gtBoxes <- sliceAxis gtBoxes 1 0 (Just 4)
+        anchor_valid <- filterGoodIndices anBoxes _allowed_border
+        overlaps <- overlapMatrix anchor_valid gtBoxes anBoxes
+
+        -- for each GT, the hightest overlapping anchors are FG.
+        fgs1     <- max_ overlaps (Just [1]) True >>= eqBroadcast overlaps
+        fgs1     <- sum_ fgs1 (Just [0]) False >>= gtScalar 0
+
+        -- FG anchors that have overlapping with any GT >= thresh
+        max_iou_per_anchor <- max_ overlaps (Just [0]) False
+        fgs2 <- geqScalar _fg_overlap max_iou_per_anchor
+
+        fgs  <- or_ fgs1 fgs2
+        -- subsample FG anchors if there are too many
+        (numFG, fgs) <- atMost _fg_num fgs
+
+        -- BG anchors that have overlapping with all GT < thresh
+        bgs  <- leqScalar _bg_overlap max_iou_per_anchor
+        (numBG, bgs) <- atMost (_batch_num - min numFG _fg_num) bgs
+
+        -- set fg to 2, bg to 1, and invalid to 0
+        labels <- rsubScalar 1 bgs >>= mul_ fgs >>= addScalar 1 >>= mul_ anchor_valid
+        -- set fg to 1, bg to 0, and invalid to -1
+        labels <- subScalar 1 labels
+
+        matches <- argmax overlaps (Just 0) False
+        means   <- zeros [4]
+        stds    <- ones  [4]
+
+        -- __contrib_box_encode expects (B, N, ..)
+        gtBoxesB <- expandDims 0 gtBoxes
+        anBoxesB <- expandDims 0 anBoxes
+        matchesB <- expandDims 0 matches
+        labelsB  <- expandDims 0 labels
+
+        [targetsB, weightsB] <- primMulti __contrib_box_encode
+                                    (#refs    := gtBoxesB
+                                  .& #anchors := anBoxesB
+                                  .& #matches := matchesB
+                                  .& #samples := labelsB
+                                  .& #means   := means
+                                  .& #stds    := stds .& Nil)
+        -- targets: (N, 4)
+        targets <- squeeze (Just [0]) targetsB
+        -- weights: (N, 4)
+        weights <- squeeze (Just [0]) weightsB
+        -- labels:  (N, 1)
+        labels <- expandDims 1 labels
+
+        return (labels, targets, weights)
   where
-    width = V.length gtBoxes
-    height = V.length anBoxes
+    filterGoodIndices :: Anchors -> Float -> IO (NDArray Float)
+    filterGoodIndices anBoxes _allowed_border = do
+        [x0, y0, x1, y1] <- splitBySections 4 1 True anBoxes
+        flag1 <- geqScalar (-_allowed_border) x0
+        flag2 <- geqScalar (-_allowed_border) y0
+        flag3 <- ltScalar (fromIntegral imWidth  + _allowed_border) x1
+        flag4 <- ltScalar (fromIntegral imHeight + _allowed_border) y1
+        V.fold1M and_ [flag1, flag2, flag3, flag4]
 
-    calcArea box = (box ^#! 2 - box ^#! 0 + 1) * (box ^#! 3 - box ^#! 1 + 1)
-    areaA = V.map calcArea anBoxes
-    areaG = V.map calcArea gtBoxes
-
-    calcOvp (Z :. ig :. ia) =
-        let gt = gtBoxes %! ig
-            anchor = anBoxes %! ia
-            iw = min (gt ^#! 2) (anchor ^#! 2) - max (gt ^#! 0) (anchor ^#! 0)
-            ih = min (gt ^#! 3) (anchor ^#! 3) - max (gt ^#! 1) (anchor ^#! 1)
-            areaI = iw * ih
-            areaU = areaA %! ia + areaG %! ig - areaI
-        in if Set.member ia goodIndices && iw > 0 && ih > 0 then areaI / areaU else 0
-
-type Labels  = Repa.Array U DIM2 Float -- UV.Vector Int
-type Targets = Repa.Array U DIM2 Float -- UV.Vector (Float, Float, Float, Float)
-type Weights = Repa.Array U DIM2 Float -- UV.Vector (Float, Float, Float, Float)
-
-assign :: (MonadReader Configuration m, MonadIO m) =>
-    V.Vector (GTBox U) -> Int -> Int -> V.Vector (Anchor U) -> m (Labels, Targets, Weights)
-assign gtBoxes imWidth imHeight anBoxes
-    | numGT == 0 = do
-        goodIndices <- filterGoodIndices
-        liftIO $ do
-            indices <- runRVar (shuffleN (Set.size goodIndices) (Set.toList goodIndices)) StdRandom
-            labels <- UVM.replicate numLabels (-1)
-            forM_ indices $ flip (UVM.write labels) 0
-            let targets = UV.replicate (numLabels * 4) 0
-                weights = UV.replicate (numLabels * 4) 0
-            labels <- UV.unsafeFreeze labels
-            let labelsRepa  = Repa.fromUnboxed (Z:.numLabels:.1) labels
-                targetsRepa = Repa.fromUnboxed (Z:.numLabels:.4) targets
-                weightsRepa = Repa.fromUnboxed (Z:.numLabels:.4) weights
-            return (labelsRepa, targetsRepa, weightsRepa)
-
-    | otherwise = do
-        _fg_overlap <- view conf_fg_overlap
-        _bg_overlap <- view conf_bg_overlap
-        _batch_num  <- view conf_batch_num
-        _fg_num     <- view conf_fg_num
-
-        goodIndices <- filterGoodIndices
-
-        -- traceShowM ("#Good Anchors:", V.length goodIndices)
-
-        liftIO $ do
-            -- TODO filter valid anchor boxes
-            labels <- UVM.replicate numLabels (-1)
-
-            overlaps <- return $ Repa.computeUnboxedS $ overlapMatrix goodIndices gtBoxes anBoxes
-            -- for each GT, the hightest overlapping anchor is FG.
-            forM_ ([0..numGT-1] :: [_]) $ \i -> do
-                let s = Repa.computeUnboxedS $ slice overlaps 0 i
-                    m = s ^#! argMax s
-                UV.mapM_ (flip (UVM.write labels) 1) $ UV.findIndices (==m) (Repa.toUnboxed s)
-
-            -- FG anchors that have overlapping with any GT >= thresh
-            -- BG anchors that have overlapping with all GT < thresh
-            UV.forM_ (UV.indexed $ Repa.toUnboxed $ Repa.foldS max 0 $ Repa.transpose overlaps) $ \(i, m) -> do
-                when (Set.member i goodIndices) $ do
-                    when (m >= _fg_overlap) $ do
-                        -- traceShowM ("FG enable ", m, i)
-                        (UVM.write labels i 1)
-                    when (m < _bg_overlap) $ do
-                        -- s <- UVM.read labels i
-                        -- when (s == 1) $ traceShowM ("FG disable ", m, i)
-                        (UVM.write labels i 0)
-
-            -- subsample FG anchors if there are too many
-            fgs <- UV.findIndices (==1) <$> UV.unsafeFreeze labels
-            let numFG = UV.length fgs
-            when (numFG > _fg_num) $ do
-                indices <- runRVar (shuffleN numFG $ UV.toList fgs) StdRandom
-                -- traceShowM ("Disable A", take (numFG - _fg_num) indices)
-                forM_ (take (numFG - _fg_num) indices) $
-                    flip (UVM.write labels) (-1)
-
-            -- subsample BG anchors if there are too many
-            bgs <- UV.findIndices (==0) <$> UV.unsafeFreeze labels
-            let numBG = UV.length bgs
-                maxBG = _batch_num - min numFG _fg_num
-            when (numBG > maxBG) $ do
-                indices <- runRVar (shuffleN numBG $ UV.toList bgs) StdRandom
-                -- traceShowM ("Disable B", take (numBG - maxBG) indices)
-                forM_ (take (numBG - maxBG) indices) $
-                    flip (UVM.write labels) (-1)
-
-            -- compute the regression from each FG anchor to its gt
-            fgs <- UV.findIndices (==1) <$> UV.unsafeFreeze labels
-            let gts = UV.map (argMax . Repa.computeS . slice overlaps 1) fgs
-                gtDiffs = UV.zipWith makeTarget fgs gts
-            targets <- UVM.replicate numLabels (0, 0, 0, 0)
-            UV.zipWithM_ (UVM.write targets) fgs gtDiffs
-
-            -- indicates which anchors have a regression
-            weights <- UVM.replicate numLabels (0, 0, 0, 0)
-            UV.forM_ fgs $ flip (UVM.write weights) (1, 1, 1, 1)
-
-            labels  <- UV.unsafeFreeze labels
-            targets <- UV.unsafeFreeze targets
-            weights <- UV.unsafeFreeze weights
-            let labelsRepa  = Repa.fromUnboxed (Z:.numLabels:.1) labels
-                targetsRepa = Repa.fromUnboxed (Z:.numLabels:.4) (flattenT targets)
-                weightsRepa = Repa.fromUnboxed (Z:.numLabels:.4) (flattenT weights)
-            return (labelsRepa, targetsRepa, weightsRepa)
-  where
-    numGT = length gtBoxes :: Int
-    numLabels = length anBoxes :: Int
-
-    --
-    -- TODO: replace slice and argMax with the one from Utils
-    --
-    slice :: _ -> Int -> Int -> _
-    slice mat 0 ind = Repa.slice mat $ Z :. ind :. All
-    slice mat 1 ind = Repa.slice mat $ Z :. All :. ind
-    slice _ _ _     = throw BadDimension
-
-    argMax :: Array U DIM1 Float -> Int
-    argMax = UV.maxIndex . Repa.toUnboxed
-
-    asTuple :: Array U DIM1 Float -> (Float, Float, Float, Float)
-    asTuple box = (box ^#! 0, box ^#! 1, box ^#! 2, box ^#! 3)
-
-    filterGoodIndices :: MonadReader Configuration m => m (Set Int)
-    filterGoodIndices = do
-        _allowed_border <- fromIntegral <$> view conf_allowed_border
-        let goodAnchor (x0, y0, x1, y1) =
-                x0 >= -_allowed_border &&
-                y0 >= -_allowed_border &&
-                x1 < fromIntegral imWidth + _allowed_border &&
-                y1 < fromIntegral imHeight + _allowed_border
-        return $ Set.fromList $ V.toList $ V.findIndices (goodAnchor . asTuple) anBoxes
-
-    makeTarget :: Int -> Int -> (Float, Float, Float, Float)
-    makeTarget fgi gti =
-        let fgBox = anBoxes %! fgi
-            gtBox = gtBoxes %! gti
-            (w1, h1, cx1, cy1) = whctr $ asTuple fgBox
-            (w2, h2, cx2, cy2) = whctr $ asTuple gtBox
-            dx = (cx2 - cx1) / (w1 + 1e-14)
-            dy = (cy2 - cy1) / (h1 + 1e-14)
-            dw = log (w2 / w1)
-            dh = log (h2 / h1)
-        in (dx, dy, dw, dh)
-
-    flattenT :: UV.Vector (Float, Float, Float, Float) -> UV.Vector Float
-    flattenT = UV.concatMap (\(a,b,c,d) -> UV.fromList [a,b,c,d])
+    -- find 1's, and keep at most `max` number of those in a 1D array.
+    atMost :: Int -> NDArray Float -> IO (Int, NDArray Float)
+    atMost max array = do
+        vec <- toVector array
+        let ind = SV.elemIndices 1 vec
+            num = SV.length ind
+        dis <- if num > max
+               then flip runRVar StdRandom $ shuffleNofM (num - max) num (SV.toList ind)
+               else pure []
+        ret <- fromVector [SV.length vec] $
+               let upd :: PrimMonad m => SV.MVector (PrimState m) Float -> m ()
+                   upd v = forM_ dis (\i -> SVM.write v i 0)
+                in SV.modify upd vec
+        return (num - length dis, ret)
 
 --
 -- Symbol for Anchor Generator
 --
-data AnchorGeneratorProp = AnchorGeneratorProp
-    { _ag_ratios        :: [Float]
-    , _ag_scales        :: [Int]
-    , _ag_anchors_alloc :: NDArray Float
-    }
+data AnchorGeneratorProp
+  = AnchorGeneratorProp
+      { _ag_ratios        :: [Float]
+      , _ag_scales        :: [Int]
+      , _ag_anchors_alloc :: NDArray Float
+      }
 makeLenses ''AnchorGeneratorProp
 
 instance CustomOperationProp AnchorGeneratorProp where
@@ -289,15 +242,17 @@ instance CustomOperation (Operation AnchorGeneratorProp) where
 
 buildAnchorGenerator :: HasCallStack => [(Text, Text)] -> IO AnchorGeneratorProp
 buildAnchorGenerator params = do
-    let allocV = anchors alloc_size stride base_size scales ratios
-        -- convert from `Vector (Array [4])` -> Array [1, 1, N, 4]
-        allocR = expandD0 $ expandD0 $ vstack $ V.map expandD0 allocV
+    allocV <- anchors alloc_size stride base_size scales ratios
+
+    let (height, width) = alloc_size
         num_scales = length scales
         num_ratios = length ratios
-        (height, width) = alloc_size
 
-    allocA <- makeEmptyNDArray [1, 1, height, width, 4*num_scales*num_ratios] contextCPU
-    copyFromRepa allocA allocR
+    allocA <- rearrange allocV "(a b h w c) d -> a b h w (c d)"
+                [ #a .== 1, #b .== 1
+                , #h .== height, #w .== width
+                , #c .== num_scales * num_ratios
+                , #d .== 4]
 
     return $ AnchorGeneratorProp
         { _ag_scales = scales
@@ -311,6 +266,3 @@ buildAnchorGenerator params = do
     ratios     = parseR (list rational) $ paramsM ^?! ix "ratios"
     base_size  = parseR decimal         $ paramsM ^?! ix "base_size"
     alloc_size = parseR (tuple decimal) $ paramsM ^?! ix "alloc_size"
-
-expandD0 :: (Repa.Shape sh, UV.Unbox e) => Array U sh e -> Array U (sh :. Int) e
-expandD0 = Repa.expandDim 0

@@ -50,9 +50,10 @@ Library
                           , hip
                           , rio
                           , vector
-                          , fei-base
-                          , fei-nn
-                          , fei-cocoapi
+                          , fei-base >= 1.1.0
+                          , fei-nn >= 2.0.0
+                          , fei-cocoapi >= 2.0.0
+                          , fei-einops
 Executable render
     hs-source-dirs:       utils
     main-is:              render.hs
@@ -95,7 +96,6 @@ Executable bench
                           random-source,
                           stm-conduit,
                           JuicyPixels,
-                          JuicyPixels-repa,
                           JuicyPixels-extra
     ghc-options:          -threaded
 
