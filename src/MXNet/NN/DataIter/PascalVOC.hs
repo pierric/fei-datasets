@@ -29,8 +29,8 @@ import           Text.XML.Expat.Tree
 
 import           MXNet.Base
 import           MXNet.Base.ParserUtils    (parseR, rational)
+import           MXNet.Base.Tensor         (cast, stack)
 import           MXNet.NN.DataIter.Common
-import           MXNet.NN.Layer            (cast, stack)
 
 data Exc = FileNotFound String String
     | CannotParseAnnotation String

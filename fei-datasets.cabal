@@ -59,8 +59,8 @@ Executable render
     main-is:              render.hs
     default-language:     Haskell2010
     build-depends:        base >= 4.7 && < 5.0,
-                          fei-base,
-                          fei-nn,
+                          fei-base >= 1.1.0,
+                          fei-nn >= 2.0.0,
                           fei-datasets,
                           optparse-applicative,
                           attoparsec,
@@ -81,8 +81,8 @@ Executable bench
     main-is:              bench.hs
     default-language:     Haskell2010
     build-depends:        base >= 4.7 && < 5.0,
-                          fei-base,
-                          fei-nn,
+                          fei-base >= 1.1.0,
+                          fei-nn >= 2.0.0,
                           fei-datasets,
                           optparse-applicative,
                           criterion,

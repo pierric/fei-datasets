@@ -18,8 +18,7 @@ import           MXNet.Base.Operators.Tensor  (__contrib_box_encode,
                                                _slice)
 import           MXNet.Base.ParserUtils       (decimal, list, parseR, rational,
                                                tuple)
-import           MXNet.NN.DataIter.Common     (Anchors, GTBoxes, getImageScale)
-import           MXNet.NN.Layer               (addScalar, add_, and_, argmax,
+import           MXNet.Base.Tensor            (addScalar, add_, and_, argmax,
                                                broadcastLike, copy, eqBroadcast,
                                                expandDims, geqScalar, gtScalar,
                                                leqScalar, ltScalar, max_,
@@ -27,6 +26,7 @@ import           MXNet.NN.Layer               (addScalar, add_, and_, argmax,
                                                rsubScalar, sliceAxis,
                                                splitBySections, squeeze, stack,
                                                subScalar, sum_)
+import           MXNet.NN.DataIter.Common     (Anchors, GTBoxes, getImageScale)
 
 data AnchorError = BadDimension deriving (Show)
 instance Exception AnchorError
@@ -39,8 +39,8 @@ data Configuration
       , _conf_allowed_border   :: Int
       , _conf_fg_num           :: Int
       , _conf_batch_num        :: Int
-      , _conf_bg_overlap       :: Float
-      , _conf_fg_overlap       :: Float
+      , _conf_bg_overlap       :: Double
+      , _conf_fg_overlap       :: Double
       }
   deriving (Show)
 makeLenses ''Configuration
@@ -168,7 +168,7 @@ assign gtBoxes imWidth imHeight anBoxes = do
 
         return (labels, targets, weights)
   where
-    filterGoodIndices :: Anchors -> Float -> IO (NDArray Float)
+    filterGoodIndices :: Anchors -> Double -> IO (NDArray Float)
     filterGoodIndices anBoxes _allowed_border = do
         [x0, y0, x1, y1] <- splitBySections 4 1 True anBoxes
         flag1 <- geqScalar (-_allowed_border) x0

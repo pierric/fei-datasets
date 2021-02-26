@@ -36,12 +36,12 @@ import qualified RIO.Vector.Storable         as SV
 import           Fei.Einops
 import           MXNet.Base
 import           MXNet.Base.Operators.Tensor (_Pad, __image_resize, _reverse)
+import           MXNet.Base.Tensor           (cast, mulScalar, reshape,
+                                              rsubScalar, splitBySections,
+                                              stack)
 import           MXNet.Coco.Mask
 import           MXNet.Coco.Types
 import           MXNet.NN.DataIter.Common
-import           MXNet.NN.Layer              (cast, mulScalar, reshape,
-                                              rsubScalar, splitBySections,
-                                              stack)
 
 classes :: V.Vector String
 classes = V.fromList [
@@ -246,7 +246,7 @@ loadMasks img = do
     masks <- V.mapM (getMask imgH imgW size) imgAnns
     if V.null masks
     then return Nothing
-    else liftIO $
+    else liftIO $ do
         masks <- stack 0 (V.toList masks)
         return $!! Just masks
 

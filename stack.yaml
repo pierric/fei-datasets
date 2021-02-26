@@ -3,6 +3,7 @@ packages:
 - .
 - ../fei-cocoapi
 - ../fei-nn
+- ../fei-einops
 - ../fei-base
 - ../tuple-ops
 extra-deps:

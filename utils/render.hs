@@ -36,10 +36,10 @@ import qualified RIO.Vector.Storable          as SV
 import qualified RIO.Vector.Unboxed           as UV
 
 import           MXNet.Base                   hiding (Symbol)
+import           MXNet.Base.Tensor            (cast, mulScalar, sliceAxis)
 import qualified MXNet.NN.DataIter.Coco       as DC
 import           MXNet.NN.DataIter.Common
 import qualified MXNet.NN.DataIter.PascalVOC  as DV
-import           MXNet.NN.Layer               (cast, mulScalar, sliceAxis)
 
 data Args = Args
     { arg_dataset   :: String

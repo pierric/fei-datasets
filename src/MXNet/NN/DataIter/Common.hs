@@ -8,7 +8,7 @@ import qualified RIO.Vector.Storable as SV
 
 import           Fei.Einops
 import           MXNet.Base          hiding (Symbol)
-import           MXNet.NN.Layer      (addBroadcast, divBroadcast, mulBroadcast,
+import           MXNet.Base.Tensor   (addBroadcast, divBroadcast, mulBroadcast,
                                       subBroadcast)
 
 type ImageTensor = NDArray Float -- (H, W, 3)
