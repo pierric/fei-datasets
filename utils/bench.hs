@@ -1,9 +1,7 @@
 import qualified Codec.Picture                as JUC
 import qualified Codec.Picture.Extra          as JUC
-import qualified Codec.Picture.Repa           as RPJ
 import           Control.Monad.Trans.Resource
 import           Criterion.Main
-import qualified Data.Array.Repa              as Repa
 import           Data.Conduit
 import           Data.Conduit.Async
 import qualified Data.Conduit.List            as C
@@ -29,13 +27,13 @@ main = do
 
     defaultMain
         [
-          bench "scale-img-juicy" $ nfIO $
-            let img1 = JUC.convertRGB8 imgjuc
-                img2 = JUC.scaleBilinear 1024 1024 img1
-                img3 = RPJ.imgData (RPJ.convertImage img2 :: RPJ.Img RPJ.RGB)
-            in Repa.computeUnboxedP img3
+        --  bench "scale-img-juicy" $ nfIO $
+        --    let img1 = JUC.convertRGB8 imgjuc
+        --        img2 = JUC.scaleBilinear 1024 1024 img1
+        --        img3 = RPJ.imgData (RPJ.convertImage img2 :: RPJ.Img RPJ.RGB)
+        --    in Repa.computeUnboxedP img3
 
-        , bench "scale-img-hip" $ nfIO $
+          bench "scale-img-hip" $ nfIO $
             let img2 = HIP.resize HIP.Bilinear HIP.Edge (1024, 1024) imghip
             in return img2
 

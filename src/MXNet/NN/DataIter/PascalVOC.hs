@@ -8,8 +8,6 @@ module MXNet.NN.DataIter.PascalVOC (
 
 import           Control.Exception         (throw)
 import           Control.Lens              (makeLenses)
-import           Data.Array.Repa           ((:.) (..), Z (..), fromListUnboxed)
-import qualified Data.Array.Repa           as Repa
 import           Data.Conduit
 import qualified Data.Conduit.Combinators  as C (yieldMany)
 import qualified Data.Conduit.List         as C
@@ -29,7 +27,9 @@ import qualified RIO.Vector.Storable       as SV
 import           Text.XML.Expat.Proc
 import           Text.XML.Expat.Tree
 
+import           MXNet.Base
 import           MXNet.Base.ParserUtils    (parseR, rational)
+import           MXNet.Base.Tensor         (cast, stack)
 import           MXNet.NN.DataIter.Common
 
 data Exc = FileNotFound String String
@@ -74,8 +74,8 @@ vocMainImages datasplit rand_gen = do
     all_images <- liftIO $ RND.runRVar (RND.shuffleN (length image_list) image_list) rand_gen
     C.yieldMany all_images .| C.map T.unpack
 
-loadImageAndBBoxes :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "voc", MonadIO m) =>
-    String -> m (Maybe (String, ImageTensor, ImageInfo, GTBoxes))
+loadImageAndBBoxes :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "voc", MonadIO m)
+    => String -> m (Maybe (String, ImageTensor, ImageInfo, GTBoxes))
 loadImageAndBBoxes ident = do
     width <- view (datasetConfig . conf_width)
     base <- view (datasetConfig . conf_base_dir)
@@ -84,21 +84,15 @@ loadImageAndBBoxes ident = do
     imgRGB <- liftIO $ raiseLeft (FileNotFound imgFilePath) $
         (HIP.readImageExact HIP.JPG imgFilePath)
 
-    let (imgH, imgW) = HIP.dims (imgRGB :: HIP.Image HIP.VS HIP.RGB Double)
-        imgH_  = fromIntegral imgH
-        imgW_  = fromIntegral imgW
-        width_ = fromIntegral width
-        (scale, imgW', imgH') = if imgW >= imgH
-            then (width_ / imgW_, width, floor (imgH_ * width_ / imgW_))
-            else (width_ / imgH_, floor (imgW_ * width_ / imgH_), width)
-        imgInfo = fromListUnboxed (Z :. 3) [fromIntegral imgH', fromIntegral imgW', scale]
-
-        imgResized = HIP.resize HIP.Bilinear HIP.Edge (imgH', imgW') imgRGB
+    let (oriH, oriW) = HIP.dims (imgRGB :: HIP.Image HIP.VS HIP.RGB Double)
+        (scale, imgH, imgW) = getImageScale oriH oriW width
+        imgResized = HIP.resize HIP.Bilinear HIP.Edge (imgH, imgW) (imgRGB :: HIP.Image HIP.VS HIP.RGB Double)
         imgPadded  = HIP.canvasSize (HIP.Fill $ HIP.PixelRGB 0.5 0.5 0.5) (width, width) imgResized
-        imgRepa    = Repa.fromUnboxed (Z:.width:.width:.3) $
-                        SV.convert $
-                        SV.unsafeCast $
-                        HIP.toVector imgPadded
+
+    info <- liftIO $ fromVector [3] [fromIntegral imgH, fromIntegral imgW, scale]
+    let img_padded_vec = SV.unsafeCast $ HIP.toVector imgPadded :: SV.Vector Double
+    img_f <- liftIO $ fromVector [width, width, 3] img_padded_vec >>= cast #float32
+    img_f <- transform img_f
 
     let annoFilePath = base </> "Annotations" </> ident <.> "xml"
     xml <- liftIO $ B.readFile annoFilePath
@@ -106,14 +100,15 @@ loadImageAndBBoxes ident = do
         Left err -> throw (CannotParseAnnotation annoFilePath) err
         Right root -> do
             let objs = findElements "object" (root :: Node Text Text)
-            return $ V.fromList $ catMaybes $ map (makeGTBox scale) objs
+            return $ catMaybes $ map (makeGTBox scale) objs
 
-    if V.null gtBoxes
-        then return Nothing
-        else do
-            imgEval <- transform $ Repa.map double2Float imgRepa
-            -- deepSeq the array so that the workload are well parallelized.
-            return $!! Just (ident, Repa.computeUnboxedS imgEval, imgInfo, gtBoxes)
+    if null gtBoxes
+    then return Nothing
+    else liftIO $ do
+        gts <- mapM (fromVector [5]) gtBoxes
+        gts <- stack 0 gts
+        return $!! Just (ident, img_f, info, gts)
+
   where
     makeGTBox scale node = do
         className <- textContent <$> findElement "name" node
@@ -127,5 +122,5 @@ loadImageAndBBoxes ident = do
             x1 = parseR rational xmax
             y0 = parseR rational ymin
             y1 = parseR rational ymax
-        return $ fromListUnboxed (Z :. 5) [x0*scale, y0*scale, x1*scale, y1*scale, fromIntegral classId]
+        return $ [x0*scale, y0*scale, x1*scale, y1*scale, fromIntegral classId]
 

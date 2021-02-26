@@ -1,18 +1,21 @@
 {-# LANGUAGE DataKinds #-}
 module MXNet.NN.DataIter.Common where
 
-import           Data.Array.Repa  ((:.) (..), Array, D, DIM1, DIM2, DIM3, U,
-                                   Z (..), fromListUnboxed, (*^), (+^), (-^),
-                                   (/^))
-import qualified Data.Array.Repa  as Repa
-import           GHC.TypeLits     (Symbol)
+import           Control.Lens        (each, (^..))
+import           GHC.TypeLits        (Symbol)
 import           RIO
-import qualified RIO.Vector.Boxed as V
+import qualified RIO.Vector.Storable as SV
 
-type ImageTensor = Array U DIM3 Float
-type ImageInfo = Array U DIM1 Float
-type GTBoxes = V.Vector (Array U DIM1 Float)
-type Masks = V.Vector (Array U DIM2 Word8)
+import           Fei.Einops
+import           MXNet.Base          hiding (Symbol)
+import           MXNet.Base.Tensor   (addBroadcast, divBroadcast, mulBroadcast,
+                                      subBroadcast)
+
+type ImageTensor = NDArray Float -- (H, W, 3)
+type ImageInfo   = NDArray Float -- (3,)
+type Anchors     = NDArray Float -- (M, 4)
+type GTBoxes     = NDArray Float -- (N, 5)
+type Masks       = NDArray Float -- (N, H, W)
 
 data family Configuration (dataset :: Symbol)
 
@@ -28,40 +31,44 @@ class HasDatasetConfig env where
 transform :: (HasDatasetConfig env,
               ImageDataset (DatasetTag env),
               MonadReader env m,
-              Repa.Source r Float)
-    => Array r DIM3 Float -> m (Array D DIM3 Float)
+              MonadIO m)
+          => NDArray Float -> m (NDArray Float)
 transform img = do
     mean <- view (datasetConfig . imagesMean)
     std  <- view (datasetConfig . imagesStdDev)
-    let broadcast = Repa.extend (Repa.Any :. height :. width)
-        mean' = broadcast $ fromTuple mean
-        std'  = broadcast $ fromTuple std
-        chnFirst = Repa.backpermute newShape (\ (Z :. c :. h :. w) -> Z :. h :. w :. c) img
-    return $ (chnFirst -^ mean') /^ std'
-  where
-    Z :. height :. width :. chn = Repa.extent img
-    newShape = Z:. chn :. height :. width
+    liftIO $ do
+        std  <- fromVector [3, 1, 1] $ SV.fromList $ std  ^.. each
+        mean <- fromVector [3, 1, 1] $ SV.fromList $ mean ^.. each
+        imgCHW <- rearrange img "h w c -> c h w" []
+        imgRet <- subBroadcast imgCHW mean
+        imgRet <- divBroadcast imgRet std
+        return imgRet
 
 -- transform CHW -> HWC
-transformInv :: (ImageDataset s, MonadReader (Configuration s) m, Repa.Source r Float) =>
-    Array r DIM3 Float -> m (Array D DIM3 Float)
+transformInv :: (HasDatasetConfig env,
+                 ImageDataset (DatasetTag env),
+                 MonadReader env m,
+                 MonadIO m)
+             => NDArray Float -> m (NDArray Float)
 transformInv img = do
-    mean <- view imagesMean
-    std <- view imagesStdDev
-    let broadcast = Repa.extend (Repa.Any :. height :. width)
-        mean' = broadcast $ fromTuple mean
-        std'  = broadcast $ fromTuple std
-        addMean = img *^ std' +^ mean'
-    return $ Repa.backpermute newShape (\ (Z :. h :. w :. c) -> Z :. c :. h :. w) addMean
-  where
-    (Z :. chn :. height :. width) = Repa.extent img
-    newShape = Z :. height :. width :. chn
-
-fromTuple (a, b, c) = fromListUnboxed (Z :. (3 :: Int)) [a,b,c]
+    mean <- view (datasetConfig . imagesMean)
+    std  <- view (datasetConfig . imagesStdDev)
+    liftIO $ do
+        mean <- fromVector [3, 1, 1] $ SV.fromList $ mean ^.. each
+        std  <- fromVector [3, 1, 1] $ SV.fromList $ std  ^.. each
+        img  <- mulBroadcast img std
+        img  <- addBroadcast img mean
+        img  <- rearrange img "c h w -> h w c" []
+        return img
 
 raiseLeft :: (MonadThrow m, Exception e) => (a -> e) -> m (Either a b) -> m b
 raiseLeft exc act = act >>= either (throwM . exc) return
 
-instance (Repa.Shape sh, Unbox e) => NFData (Array U sh e) where
-    rnf arr = Repa.deepSeqArray arr ()
-
+getImageScale :: Int -> Int -> Int -> (Float, Int, Int)
+getImageScale height width size
+  | width >= height = (sizeF / oriW, floor (oriH* sizeF / oriW), size)
+  | otherwise       = (sizeF / oriH, size, floor (oriW* sizeF / oriH))
+    where
+        oriW  = fromIntegral width
+        oriH  = fromIntegral height
+        sizeF = fromIntegral size

@@ -2,14 +2,13 @@
 {-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE KindSignatures    #-}
+{-# LANGUAGE OverloadedLabels  #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 module Main where
 
 import           Codec.Picture.Types
 import           Control.Monad.Trans.Resource
-import           Data.Array.Repa              ((:.) (..), Z (..))
-import qualified Data.Array.Repa              as Repa
 import           Data.Attoparsec.Text         (char, decimal, endOfInput,
                                                parseOnly, rational, sepBy)
 import           Data.Conduit
@@ -36,6 +35,8 @@ import qualified RIO.Vector.Boxed.Partial     as V ((!))
 import qualified RIO.Vector.Storable          as SV
 import qualified RIO.Vector.Unboxed           as UV
 
+import           MXNet.Base                   hiding (Symbol)
+import           MXNet.Base.Tensor            (cast, mulScalar, sliceAxis)
 import qualified MXNet.NN.DataIter.Coco       as DC
 import           MXNet.NN.DataIter.Common
 import qualified MXNet.NN.DataIter.PascalVOC  as DV
@@ -79,30 +80,43 @@ instance HasWidth "voc" where
 instance HasWidth "coco" where
     targetWidth = DC.conf_width
 
-renderWithBBox :: (HasWidth s, ImageDataset s, MonadReader (Configuration s) m, MonadIO m) =>
-    Font -> (String, V.Vector String, ImageTensor, ImageInfo, GTBoxes) -> m (String, HIP.Image HIP.VS HIP.RGBA HIP.Word8)
+renderWithBBox :: ( HasCallStack
+                  , HasWidth s
+                  , HasDatasetConfig (Configuration s)
+                  , ImageDataset (DatasetTag (Configuration s))
+                  , MonadReader (Configuration s) m, MonadIO m)
+                => Font
+                -> (String, V.Vector String, ImageTensor, ImageInfo, GTBoxes)
+                -> m (String, HIP.Image HIP.VS HIP.RGBA HIP.Word8)
 renderWithBBox font (ident, cls, img, info, gt) = do
     width <- view targetWidth
+    arr   <- transformInv img
+    rawSV <- liftIO $ mulScalar 255 arr >>= cast #uint8 >>= toVector
+    boxes <- liftIO $ V.unfoldr split <$> toVector gt
     let height = width
-    arr <- transformInv img
-    let rawUV = Repa.toUnboxed $ Repa.computeUnboxedS $ Repa.map (floor . (* 255.0)) arr :: UV.Vector HIP.Word8
-        rawSV = SV.unsafeCast $ UV.convert rawUV  :: HIP.Vector HIP.VS (HIP.Pixel HIP.RGB HIP.Word8)
-        img = promoteImage $ HIP.toJPImageRGB8 $ HIP.fromVector (height, width) rawSV
+        img = promoteImage $ HIP.toJPImageRGB8 $ HIP.fromVector (height, width) $ SV.unsafeCast (rawSV :: SV.Vector Word8)
         res = renderDrawing width height (PixelRGBA8 0 0 0 0) $ do
                 drawImage img 0 (V2 0 0)
                 withTexture (uniformTexture $ PixelRGBA8 255 0 0 255) $ do
-                    void $ forM (zip [0..] $ V.toList boxes) $ \(ind, [x0, y0, x1, y1, _]) -> do
+                    void $ forM (zip [0..] $ V.toList boxes) $ \(ind, gt) -> do
+                        let [x0, y0, x1, y1, _] = SV.toList gt
                         stroke 1 JoinRound (CapRound, CapRound) $ rectangle (V2 x0 y0) (x1 - x0) (y1 - y0)
                         withTexture (uniformTexture $ PixelRGBA8 255 255 255 255) $ do
                             printTextAt font (PointSize 10) (V2 (x0+2) (y0+12)) (cls V.! ind)
     return $ (ident, HIP.fromJPImageRGBA8 res)
-  where
-    boxes = V.map (UV.toList . Repa.toUnboxed) gt
 
-lookupClassName :: V.Vector String -> (String, ImageTensor, ImageInfo, GTBoxes) -> (String, V.Vector String, ImageTensor, ImageInfo, GTBoxes)
-lookupClassName table (imgname, tensor, info, gt) = (imgname, gtNames, tensor, info, gt)
-  where
-    gtNames = V.map ((table V.!) . floor . (`Repa.index` (Z:.4))) gt
+    where
+        split vec | SV.null vec = Nothing
+                  | otherwise   = Just $ SV.splitAt 5 vec
+
+lookupClassName :: (HasCallStack, MonadIO m)
+                => V.Vector String
+                -> (String, ImageTensor, ImageInfo, GTBoxes)
+                -> m (String, V.Vector String, ImageTensor, ImageInfo, GTBoxes)
+lookupClassName table (imgname, tensor, info, gt) = liftIO $ do
+    cls <- sliceAxis gt 1 4 (Just 5) >>= toVector
+    let names = V.map (table V.!) $ SV.convert $ SV.map floor cls
+    return (imgname, names, tensor, info, gt)
 
 main :: IO ()
 main = do
@@ -117,7 +131,7 @@ main = do
         Right a  -> return a
     Args{..} <- execParser $ info (cmdArgParser <**> helper) fullDesc
     let save (ident, img) = liftIO $ HIP.writeImageExact HIP.PNG [] (ident <.> "png") img
-        dump :: (HasWidth s, ImageDataset s, MonadReader (Configuration s) m, MonadIO m) =>
+        dump :: (HasWidth s,  HasDatasetConfig (Configuration s), ImageDataset (DatasetTag (Configuration s)), MonadReader (Configuration s) m, MonadIO m) =>
                 ConduitT (String, V.Vector String, ImageTensor, ImageInfo, GTBoxes) Void m ()
         dump = C.take arg_num_imgs .|
                C.mapM (renderWithBBox font) .|
@@ -130,9 +144,9 @@ main = do
             coco <- DC.coco arg_base_dir arg_datasplit
             let conf = DC.CocoConfig coco arg_width arg_mean arg_stddev
                 iter = DC.cocoImagesBBoxes rand_gen .| C.mapM (DC.augmentWithBBoxes rand_gen)
-            void $ runResourceT $ flip runReaderT conf $ runConduit $ iter .| C.map (lookupClassName DC.classes) .| dump
+            void $ runResourceT $ flip runReaderT conf $ runConduit $ iter .| C.mapM (lookupClassName DC.classes) .| dump
         "voc" -> do
             let conf = DV.VOCConfig arg_base_dir arg_width arg_mean arg_stddev
                 iter = DV.vocMainImages arg_datasplit rand_gen .| C.mapM DV.loadImageAndBBoxes .| C.catMaybes
-            void $ flip runReaderT conf $ runConduit $ iter .| C.map (lookupClassName $ V.map T.unpack DV.classes) .| dump
+            void $ flip runReaderT conf $ runConduit $ iter .| C.mapM (lookupClassName $ V.map T.unpack DV.classes) .| dump
 
