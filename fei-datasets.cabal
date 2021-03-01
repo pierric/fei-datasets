@@ -36,9 +36,7 @@ Library
                           , storable-tuple
                           , lens >= 4.12
                           , transformers-base >= 0.4.4
-                          , aeson >= 1.2
-                          , repa >= 3.4
-                          , aeson >= 1.0 && <1.5
+                          , aeson >= 1.2 && <1.6
                           , attoparsec (>=0.13.2.2 && <0.14)
                           , conduit >= 1.2 && < 1.4
                           , hexpat
@@ -67,7 +65,6 @@ Executable render
                           resourcet,
                           lens,
                           conduit,
-                          repa,
                           hip,
                           vector,
                           rio,
@@ -90,7 +87,6 @@ Executable bench
                           resourcet,
                           lens,
                           conduit,
-                          repa,
                           hip,
                           rio,
                           random-source,
