@@ -48,7 +48,7 @@ Library
                           , hip
                           , rio
                           , vector
-                          , fei-base >= 1.1.0
+                          , fei-base >= 2.0.0
                           , fei-nn >= 2.0.0
                           , fei-cocoapi >= 2.0.0
                           , fei-einops
@@ -57,7 +57,7 @@ Executable render
     main-is:              render.hs
     default-language:     Haskell2010
     build-depends:        base >= 4.7 && < 5.0,
-                          fei-base >= 1.1.0,
+                          fei-base >= 2.0.0,
                           fei-nn >= 2.0.0,
                           fei-datasets,
                           optparse-applicative,
@@ -78,7 +78,7 @@ Executable bench
     main-is:              bench.hs
     default-language:     Haskell2010
     build-depends:        base >= 4.7 && < 5.0,
-                          fei-base >= 1.1.0,
+                          fei-base >= 2.0.0,
                           fei-nn >= 2.0.0,
                           fei-datasets,
                           optparse-applicative,

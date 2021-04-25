@@ -1,4 +1,5 @@
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TemplateHaskell  #-}
+{-# LANGUAGE TypeApplications #-}
 module MXNet.NN.DataIter.Anchor where
 
 import           Control.Lens                 (ix, makeLenses, (^?!))
@@ -8,25 +9,24 @@ import qualified Data.Vector                  as V (fold1M)
 import qualified Data.Vector.Storable.Mutable as SVM
 import           RIO
 import qualified RIO.HashMap                  as M
-import qualified RIO.NonEmpty                 as NE
 import qualified RIO.Vector.Storable          as SV
 
 import           Fei.Einops
-import           MXNet.Base
+import           MXNet.Base                   hiding (ones, zeros)
+import           MXNet.Base.NDArray           (ones, zeros)
 import           MXNet.Base.Operators.Tensor  (__contrib_box_encode,
                                                __contrib_box_iou, __set_value,
                                                _slice)
 import           MXNet.Base.ParserUtils       (decimal, list, parseR, rational,
                                                tuple)
 import           MXNet.Base.Tensor            (addScalar, add_, and_, argmax,
-                                               broadcastLike, copy, eqBroadcast,
-                                               expandDims, geqScalar, gtScalar,
-                                               leqScalar, ltScalar, max_,
-                                               mulBroadcast, mul_, or_, reshape,
+                                               copy, eq_, expandDims, geqScalar,
+                                               gtScalar, leqScalar, ltScalar,
+                                               max_, mul_, or_, reshape,
                                                rsubScalar, sliceAxis,
                                                splitBySections, squeeze, stack,
                                                subScalar, sum_)
-import           MXNet.NN.DataIter.Common     (Anchors, GTBoxes, getImageScale)
+import           MXNet.NN.DataIter.Common     (Anchors, GTBoxes)
 
 data AnchorError = BadDimension deriving (Show)
 instance Exception AnchorError
@@ -89,7 +89,7 @@ overlapMatrix mask gtBoxes anBoxes = do
     iou <- prim __contrib_box_iou (#lhs := gtBoxes .& #rhs := anBoxes .& #format := #corner .& Nil)
     -- rearrange mask from [numAnchors] -> [1, numAnchors]
     mask <- rearrange mask "(n a) -> n a" [#n .== 1]
-    mulBroadcast iou mask
+    mul_ iou mask
 
 type Labels  = NDArray Float -- DIM2
 type Targets = NDArray Float -- DIM2
@@ -122,7 +122,7 @@ assign gtBoxes imWidth imHeight anBoxes = do
         overlaps <- overlapMatrix anchor_valid gtBoxes anBoxes
 
         -- for each GT, the hightest overlapping anchors are FG.
-        fgs1     <- max_ overlaps (Just [1]) True >>= eqBroadcast overlaps
+        fgs1     <- max_ overlaps (Just [1]) True >>= eq_ overlaps
         fgs1     <- sum_ fgs1 (Just [0]) False >>= gtScalar 0
 
         -- FG anchors that have overlapping with any GT >= thresh
@@ -137,12 +137,15 @@ assign gtBoxes imWidth imHeight anBoxes = do
         bgs  <- leqScalar _bg_overlap max_iou_per_anchor
         (numBG, bgs) <- atMost (_batch_num - min numFG _fg_num) bgs
 
+        fgs <- castToFloat @(DTypeName Float) fgs
+        bgs <- castToFloat @(DTypeName Float) bgs
+
         -- set fg to 2, bg to 1, and invalid to 0
         labels <- rsubScalar 1 bgs >>= mul_ fgs >>= addScalar 1 >>= mul_ anchor_valid
         -- set fg to 1, bg to 0, and invalid to -1
         labels <- subScalar 1 labels
 
-        matches <- argmax overlaps (Just 0) False
+        matches <- argmax overlaps (Just 0) False >>= castToFloat @(DTypeName Float)
         means   <- zeros [4]
         stds    <- ones  [4]
 
@@ -175,20 +178,20 @@ assign gtBoxes imWidth imHeight anBoxes = do
         flag2 <- geqScalar (-_allowed_border) y0
         flag3 <- ltScalar (fromIntegral imWidth  + _allowed_border) x1
         flag4 <- ltScalar (fromIntegral imHeight + _allowed_border) y1
-        V.fold1M and_ [flag1, flag2, flag3, flag4]
+        V.fold1M and_ [flag1, flag2, flag3, flag4] >>= castToFloat @(DTypeName Float)
 
     -- find 1's, and keep at most `max` number of those in a 1D array.
-    atMost :: Int -> NDArray Float -> IO (Int, NDArray Float)
+    atMost :: Int -> NDArray Bool -> IO (Int, NDArray Bool)
     atMost max array = do
         vec <- toVector array
-        let ind = SV.elemIndices 1 vec
+        let ind = SV.elemIndices True vec
             num = SV.length ind
         dis <- if num > max
                then flip runRVar StdRandom $ shuffleNofM (num - max) num (SV.toList ind)
                else pure []
         ret <- fromVector [SV.length vec] $
-               let upd :: PrimMonad m => SV.MVector (PrimState m) Float -> m ()
-                   upd v = forM_ dis (\i -> SVM.write v i 0)
+               let upd :: PrimMonad m => SV.MVector (PrimState m) Bool -> m ()
+                   upd v = forM_ dis (\i -> SVM.write v i False)
                 in SV.modify upd vec
         return (num - length dis, ret)
 
@@ -208,11 +211,11 @@ instance CustomOperationProp AnchorGeneratorProp where
     prop_list_outputs _          = ["anchors"]
     prop_list_auxiliary_states _ = []
     prop_infer_shape prop [feature_shape] =
-        let STensor [_, _, h, w] = feature_shape
+        let [_, _, h, w] = feature_shape
             num_scales = length (prop ^. ag_scales)
             num_ratios = length (prop ^. ag_ratios)
             num_anchs  = num_scales * num_ratios * h * w
-            anchors_shape        = STensor [1, num_anchs, 4]
+            anchors_shape = [1, num_anchs, 4]
         in ([feature_shape], [anchors_shape], [])
     prop_declare_backward_dependency _ _ _ _ = []
 
@@ -227,7 +230,7 @@ instance CustomOperation (Operation AnchorGeneratorProp) where
         let alloc = prop ^. ag_anchors_alloc
 
         -- get the height, width of the feature (B,C,H,W)
-        [_,_,h,w] <- NE.toList <$> ndshape (NDArray feature :: NDArray Float)
+        [_,_,h,w] <- ndshape (NDArray feature :: NDArray Float)
         let beg = [0,0,0,0]
             end = [1,1,h,w]
         ret <- prim _slice (#data := alloc .& #begin:= beg .& #end:= end .& Nil)
@@ -237,8 +240,8 @@ instance CustomOperation (Operation AnchorGeneratorProp) where
     backward _ [ReqWrite] _ _ [in_grad_0] _ _ = do
         -- type annotation is necessary, because only a general form
         -- can be inferred.
-        let set_zeros = __set_value (#src := 0 .& Nil) :: TensorApply NDArrayHandle
-        void $ set_zeros (Just ([in_grad_0]))
+        let set_zeros = __set_value (#src := 0 .& Nil) :: TensorApply (NDArray Float)
+        void $ set_zeros (Just ([NDArray in_grad_0]))
 
 buildAnchorGenerator :: HasCallStack => [(Text, Text)] -> IO AnchorGeneratorProp
 buildAnchorGenerator params = do
