@@ -8,8 +8,7 @@ import qualified RIO.Vector.Storable as SV
 
 import           Fei.Einops
 import           MXNet.Base          hiding (Symbol)
-import           MXNet.Base.Tensor   (addBroadcast, divBroadcast, mulBroadcast,
-                                      subBroadcast)
+import           MXNet.Base.Tensor   (add_, div_, mul_, sub_)
 
 type ImageTensor = NDArray Float -- (H, W, 3)
 type ImageInfo   = NDArray Float -- (3,)
@@ -40,8 +39,8 @@ transform img = do
         std  <- fromVector [3, 1, 1] $ SV.fromList $ std  ^.. each
         mean <- fromVector [3, 1, 1] $ SV.fromList $ mean ^.. each
         imgCHW <- rearrange img "h w c -> c h w" []
-        imgRet <- subBroadcast imgCHW mean
-        imgRet <- divBroadcast imgRet std
+        imgRet <- sub_ imgCHW mean
+        imgRet <- div_ imgRet std
         return imgRet
 
 -- transform CHW -> HWC
@@ -56,8 +55,8 @@ transformInv img = do
     liftIO $ do
         mean <- fromVector [3, 1, 1] $ SV.fromList $ mean ^.. each
         std  <- fromVector [3, 1, 1] $ SV.fromList $ std  ^.. each
-        img  <- mulBroadcast img std
-        img  <- addBroadcast img mean
+        img  <- mul_ img std
+        img  <- add_ img mean
         img  <- rearrange img "c h w -> h w c" []
         return img
 
