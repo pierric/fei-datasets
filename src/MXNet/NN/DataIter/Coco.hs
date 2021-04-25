@@ -34,7 +34,8 @@ import qualified RIO.Vector.Boxed            as V
 import qualified RIO.Vector.Storable         as SV
 
 import           Fei.Einops
-import           MXNet.Base
+import           MXNet.Base                  hiding (zeros)
+import           MXNet.Base.NDArray          (zeros)
 import           MXNet.Base.Operators.Tensor (_Pad, __image_resize, _reverse)
 import           MXNet.Base.Tensor           (cast, mulScalar, reshape,
                                               rsubScalar, splitBySections,
@@ -87,7 +88,7 @@ instance ImageDataset "coco" where
     imagesMean = conf_mean
     imagesStdDev = conf_std
 
-cached :: Store.Store a => String -> IO a -> IO a
+cached :: (HasCallStack, Store.Store a) => String -> IO a -> IO a
 cached name action = do
     createDirectoryIfMissing True "cache"
     hitCache <- doesFileExist path
@@ -100,7 +101,7 @@ cached name action = do
   where
     path = "cache/" ++ name
 
-coco :: String -> String -> IO Coco
+coco :: HasCallStack => String -> String -> IO Coco
 coco base datasplit = cached (datasplit ++ ".store") $ do
     let annotationFile = base </> "annotations" </> ("instances_" ++ datasplit ++ ".json")
     inst <- raiseLeft (FileNotFound annotationFile) $ Aeson.eitherDecodeFileStrict' annotationFile
@@ -114,7 +115,7 @@ coco base datasplit = cached (datasplit ++ ".store") $ do
         get_cat_classid _ = error "index not found in classes"
 
 
-cocoImageList :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
+cocoImageList :: (HasCallStack, MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
               => IORef StdGen -> ConduitT () Image m ()
 cocoImageList rand_gen = do
     Coco _ _ inst _ <- view (datasetConfig . conf_coco)
@@ -124,7 +125,7 @@ cocoImageList rand_gen = do
     C.yieldMany all_images_shuffle -- .| C.iterM (liftIO . print)
 
 
-cocoImages :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
+cocoImages :: (HasCallStack, MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
            => IORef StdGen -> ConduitT () (String, ImageTensor, ImageInfo) m ()
 cocoImages rand_gen = cocoImageList rand_gen .| C.mapM build
     where
@@ -134,7 +135,7 @@ cocoImages rand_gen = cocoImageList rand_gen .| C.mapM build
             return $!! (filename, img, info)
 
 
-cocoImagesBBoxes :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
+cocoImagesBBoxes :: (HasCallStack, MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
                  => IORef StdGen -> ConduitT () (String, ImageTensor, ImageInfo, GTBoxes) m ()
 cocoImagesBBoxes rand_gen = cocoImageList rand_gen .| C.mapM build .| C.catMaybes
     where
@@ -147,7 +148,7 @@ cocoImagesBBoxes rand_gen = cocoImageList rand_gen .| C.mapM build .| C.catMaybe
               Just boxes -> return $!! Just (filename, img, info, boxes)
 
 
-cocoImagesBBoxesMasks :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
+cocoImagesBBoxesMasks :: (HasCallStack, MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
                       => IORef StdGen -> ConduitT () (String, ImageTensor, ImageInfo, GTBoxes, Masks) m ()
 cocoImagesBBoxesMasks rand_gen = cocoImageList rand_gen .| C.mapM build .| C.catMaybes
     where
@@ -161,7 +162,7 @@ cocoImagesBBoxesMasks rand_gen = cocoImageList rand_gen .| C.mapM build .| C.cat
               Just (boxes, masks) -> return $!! Just (filename, img, info, boxes, masks)
 
 
-augmentWithBBoxes :: MonadIO m
+augmentWithBBoxes :: (HasCallStack, MonadIO m)
                   => IORef StdGen
                   -> (String, ImageTensor, ImageInfo, GTBoxes)
                   -> m (String, ImageTensor, ImageInfo, GTBoxes)
@@ -179,7 +180,7 @@ augmentWithBBoxes rand_gen inp@(ident, img, info, bboxes) = liftIO $ do
         return (ident, img_flipped, info, boxes_flipped)
 
 
-loadImage :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
+loadImage :: (HasCallStack, MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
     => Image -> m (ImageTensor, ImageInfo)
 loadImage img = do
     Coco base datasplit _ _ <- view (datasetConfig . conf_coco)
@@ -199,7 +200,7 @@ loadImage img = do
     return (img_f, info)
 
 
-loadBoundingBoxes :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
+loadBoundingBoxes :: (HasCallStack, MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
     => Image -> m (Maybe GTBoxes)
 loadBoundingBoxes img = do
     Coco _ _ inst cat_to_classid <- view (datasetConfig . conf_coco)
@@ -235,7 +236,7 @@ loadBoundingBoxes img = do
              in (x0, y0, x1, y1)
 
 
-loadMasks :: (MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
+loadMasks :: (HasCallStack, MonadReader env m, HasDatasetConfig env, DatasetTag env ~ "coco", MonadIO m)
           => Image -> m (Maybe Masks)
 loadMasks img = do
     Coco _ _ inst _ <- view (datasetConfig . conf_coco)
@@ -267,10 +268,16 @@ loadMasks img = do
                       (#data := mask .& #size := [upW, upH] .& Nil)
             -- uint8 -> float32, value stay in [0, 1]
             mask <- cast #float32 mask
-            -- pad only works for 4/5d ndarray
-            mask <- rearrange mask "(a b w) h c -> a b w h c" [#a .== 1, #b .== 1]
-            mask <- prim _Pad
-                      (#data := mask .& #mode := #constant .& #constant_value := 0
-                    .& #pad_width := [0, 0, 0, 0, 0, size - upH, 0, size - upW, 0, 0] .& Nil)
-            reshape [size, size] mask
+
+            [_, _, 1] <- ndshape mask
+            case (compare upH size, compare upW size) of
+              (LT, EQ) -> do
+                  padding <- zeros [size - upH, size, 1]
+                  concat_ 0 [mask, padding]
+              (EQ, LT) -> do
+                  padding <- zeros [size, size - upW, 1]
+                  concat_ 1 [mask, padding]
+              (EQ, EQ) ->
+                  return mask
+              _ -> throwString "It cannot be."
 
